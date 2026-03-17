@@ -1,0 +1,66 @@
+entries:
+  - type: heuristic
+    statement: "When debugging, change one thing at a time and verify the effect before changing another."
+    reasoning: "Multiple simultaneous changes make it impossible to determine which change fixed the bug or introduced a new one. Disciplined isolation is faster than shotgun debugging."
+    implications:
+      - "Resist the urge to 'fix everything at once'"
+      - "Commit or stash between debugging attempts"
+      - "Use version control as a debugging tool"
+    applicability_conditions:
+      - "Investigating any bug or unexpected behavior"
+    domains:
+      - "debugging"
+      - "software_engineering"
+
+  - type: heuristic
+    statement: "Read the error message completely before acting on it — the answer is often in the text you skipped."
+    reasoning: "Developers frequently pattern-match on the first few words of an error and miss crucial context in the full message, stack trace, or linked documentation."
+    implications:
+      - "Read the entire stack trace"
+      - "Check for 'caused by' chains"
+      - "Look at the specific line numbers and file paths"
+    applicability_conditions:
+      - "Encountering any error or exception"
+    domains:
+      - "debugging"
+
+  - type: principle
+    statement: "The bug is in the code you think is correct — question your assumptions systematically."
+    reasoning: "Bugs persist because developers search in places they suspect, not places they're certain about. The bug lives in the code you're not examining because you 'know' it works."
+    implications:
+      - "Verify assumptions with print statements or debugger"
+      - "Check inputs at every boundary, not just where you expect problems"
+      - "Binary search through the code path to isolate the issue"
+    applicability_conditions:
+      - "Debugging that has persisted beyond initial investigation"
+      - "When the 'obvious' fix didn't work"
+    domains:
+      - "debugging"
+
+  - type: heuristic
+    statement: "Reproduce the bug reliably before attempting to fix it — a fix you can't verify isn't a fix."
+    reasoning: "Without reliable reproduction, you can't confirm the fix works and you can't write a regression test. Many 'fixes' for unreproducible bugs simply mask the problem."
+    implications:
+      - "Write a failing test case first"
+      - "Minimize the reproduction case"
+      - "Document exact steps and environment"
+    applicability_conditions:
+      - "Any bug fix attempt"
+    inapplicability_conditions:
+      - "Race conditions where reproduction is inherently non-deterministic (still try)"
+    domains:
+      - "debugging"
+      - "testing"
+
+  - type: meta_pattern
+    statement: "Most bugs cluster in recently changed code, integration boundaries, and state management."
+    reasoning: "New code hasn't been battle-tested. Boundaries between systems have impedance mismatches. Mutable state creates temporal coupling. These three areas account for the majority of defects."
+    implications:
+      - "Focus debugging on recent changes first (git blame/log)"
+      - "Check API contracts and serialization boundaries"
+      - "Look for shared mutable state and race conditions"
+    applicability_conditions:
+      - "Prioritizing where to look when debugging"
+    domains:
+      - "debugging"
+      - "software_engineering"

@@ -1,0 +1,101 @@
+entries:
+  - type: principle
+    statement: "Simplicity is the ultimate sophistication — prefer the simplest solution that works correctly."
+    reasoning: "Complex solutions have more failure modes, are harder to debug, and resist modification. Simpler code is read more often than it is written."
+    implications:
+      - "Avoid premature abstraction"
+      - "Three similar lines are better than one clever abstraction"
+      - "Only add complexity when current simplicity is demonstrably insufficient"
+    applicability_conditions:
+      - "Writing new code or refactoring existing code"
+      - "Choosing between architectural approaches"
+    inapplicability_conditions:
+      - "Performance-critical hot paths where complexity is measured and justified"
+      - "Security-sensitive code where thoroughness trumps simplicity"
+    domains:
+      - "software_engineering"
+    trade_offs:
+      - dimension: "simplicity vs flexibility"
+        benefit: "Easier to understand, debug, and modify"
+        benefit_magnitude: 0.8
+        cost: "May need refactoring when requirements change"
+        cost_magnitude: 0.3
+
+  - type: principle
+    statement: "Make errors impossible through types and structure rather than catching them at runtime."
+    reasoning: "Compile-time and structural guarantees eliminate entire classes of bugs. Runtime checks are a safety net, not a foundation."
+    implications:
+      - "Use type systems fully — enums, tagged unions, non-nullable types"
+      - "Prefer parse-don't-validate patterns"
+      - "Design APIs where invalid states are unrepresentable"
+    applicability_conditions:
+      - "Designing data models and APIs"
+      - "Languages with strong type systems"
+    inapplicability_conditions:
+      - "Rapid prototyping where types slow exploration"
+      - "Dynamic language ecosystems where types add friction without tooling support"
+    domains:
+      - "software_engineering"
+    trade_offs:
+      - dimension: "safety vs development speed"
+        benefit: "Fewer runtime errors, self-documenting interfaces"
+        benefit_magnitude: 0.8
+        cost: "More upfront design effort"
+        cost_magnitude: 0.4
+
+  - type: heuristic
+    statement: "Test behavior, not implementation — tests should verify what code does, not how it does it."
+    reasoning: "Implementation-coupled tests break on every refactor without catching real bugs. Behavior-focused tests survive refactoring and catch regressions."
+    implications:
+      - "Test public interfaces, not private methods"
+      - "Use realistic inputs and verify outputs"
+      - "Avoid over-mocking — prefer integration tests for critical paths"
+    applicability_conditions:
+      - "Writing automated tests"
+      - "Choosing test granularity"
+    inapplicability_conditions:
+      - "Testing algorithmic correctness where implementation details matter"
+      - "Performance testing where internal behavior is the subject"
+    domains:
+      - "software_engineering"
+      - "testing"
+    trade_offs:
+      - dimension: "test stability vs coverage granularity"
+        benefit: "Tests survive refactoring, catch real regressions"
+        benefit_magnitude: 0.7
+        cost: "May miss internal bugs that behavior tests don't exercise"
+        cost_magnitude: 0.3
+
+  - type: principle
+    statement: "Every piece of knowledge should have a single, authoritative source in the system."
+    reasoning: "Duplicated knowledge drifts apart over time, creating inconsistency bugs that are hard to diagnose because both copies seem correct."
+    implications:
+      - "Don't repeat configuration in multiple files"
+      - "Derive values rather than duplicating them"
+      - "Single source of truth for schemas, constants, and business rules"
+    applicability_conditions:
+      - "System design and architecture"
+      - "Configuration management"
+    domains:
+      - "software_engineering"
+
+  - type: judgment_rule
+    statement: "Optimize for readability first, performance second — profile before you optimize."
+    reasoning: "Most code is not on the critical path. Premature optimization trades readability (which affects every maintainer) for speed (which may not matter). Profiling identifies the 3% of code where optimization has impact."
+    implications:
+      - "Write clear code first"
+      - "Measure before optimizing"
+      - "Document WHY when you do optimize"
+    applicability_conditions:
+      - "General application code"
+    inapplicability_conditions:
+      - "Known hot loops identified by profiling"
+      - "Real-time systems with hard latency requirements"
+    domains:
+      - "software_engineering"
+    trade_offs:
+      - dimension: "readability vs performance"
+        benefit: "Code is maintainable and correct"
+        benefit_magnitude: 0.7
+        cost: "May leave performance on the table in non-obvious hot paths"
+        cost_magnitude: 0.2

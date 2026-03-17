@@ -1,0 +1,192 @@
+# CLI Wisdom System
+
+This is my personal project. Care for it like it is your baby. Every change should make it stronger, not just different. If something feels fragile, fix it. If something feels unclear, clarify it. If you're not sure a change is right, don't make it — think longer.
+
+## What this is
+
+A system for LLMs to accumulate, retain, and apply wisdom through the DIKW hierarchy (Data -> Information -> Knowledge -> Wisdom). Not RAG. Not memory. Wisdom — distilled principles with confidence tracking, applicability conditions, trade-off awareness, lifecycle management, and an immune system that actively challenges what it believes.
+
+## How to run
+
+```bash
+pip install -e ".[dev]"       # Core + tests
+pip install -e ".[mcp]"       # MCP server support
+pip install -e ".[all]"       # Everything including LLM providers
+
+wisdom --help                 # CLI
+python -m pytest tests/ -v    # Tests (165 tests, all must pass)
+python -m wisdom.mcp_server   # MCP server (stdio)
+
+WISDOM_DATA_DIR=/path/to/data wisdom init --seed all   # Bootstrap
+```
+
+## Architecture — the dependency graph matters
+
+```
+WisdomSystem (composition root: src/wisdom/__init__.py)
+  |
+  +-- Storage: SQLiteStore + VectorStore (ChromaDB)
+  |
+  +-- LifecycleManager (SINGLE source of truth for state transitions)
+  |     |
+  +-- WisdomEngine -----> delegates lifecycle to LifecycleManager
+  +-- EvolutionEngine --> delegates lifecycle to LifecycleManager
+  |
+  +-- Trust layer:
+  |     ValidationEngine   -- external verification gates promotions
+  |     AdversarialEngine  -- devil's advocate challenges wisdom (accepts risk profiles)
+  |     PropagationEngine  -- cascades consequences when wisdom fails
+  |     CoverageEngine     -- detects semantic blind spots
+  |
+  +-- Core engines:
+  |     ExperienceEngine, KnowledgeEngine, RetrievalEngine
+  |     TriggerEngine, GapAnalysisEngine
+  |
+  +-- Meta-learning:
+  |     MetaLearningEngine -- analyzes failure patterns, computes risk scores
+  |
+  +-- LLM: ProviderRegistry (Anthropic, OpenAI, Ollama — all optional)
+```
+
+## Rules — read these before changing anything
+
+### The lifecycle state machine lives in ONE place
+`engine/lifecycle.py` is the single authority. `WisdomEngine` and `EvolutionEngine` both delegate to it. Never add lifecycle transition logic anywhere else. This was a hard-won fix for a duplication bug where two copies of the state machine drifted apart with different thresholds, different logging, and different side effects.
+
+### The system is structurally skeptical
+Unvalidated wisdom gets a 40% confidence discount at retrieval time (`engine/retrieval.py`). Pipeline-created wisdom cannot be promoted to ESTABLISHED without external validation (`engine/lifecycle.py:_has_validation`). This is not a feature flag. This is the system's epistemology. Do not weaken it.
+
+### Failures have real consequences
+When wisdom is deprecated or found wrong, `engine/propagation.py:cascade_failure()` traces the provenance graph and applies penalties to sibling wisdom (proportional to knowledge overlap), source knowledge entries, and application experiences (marked contaminated). This is the immune response. A confidence score dropping by 0.08 is bookkeeping; contaminating 50 downstream entries is a consequence.
+
+### The adversarial engine fights back
+`engine/adversarial.py` runs five challenge batteries: counterexample search, vagueness detection, contradiction scan, blind spot detection, untested condition check. Wisdom that fails (any critical finding) does not receive adversarial validation. Do not soften the checks. The adversarial engine accepts an optional `risk_profile` dict from MetaLearningEngine to adjust its thresholds for high-risk profiles — but has zero import dependency on it.
+
+### Temporal decay is computed, not stored
+Confidence decay over time is applied at retrieval time, not by mutating stored values. The formula lives in `engine/evolution.py:_compute_temporal_decay()` and is used by both `retrieval.py` and `evolution.py`. One formula, one function. Keep it that way.
+
+### Confidence is multi-dimensional
+`ConfidenceScore.overall` is a `@computed_field` derived from three sub-dimensions: `empirical` (0.4 weight — field evidence from applications), `theoretical` (0.3 — logical/structural validation), `observational` (0.3 — weak signals). Never set `overall` directly — it is read-only. Use `confidence.apply_delta(dimension, delta)` to change confidence, which scales the sub-dimension change so the effective overall change approximates the requested delta. This ensures confidence provenance is always traceable: you can see WHERE confidence comes from.
+
+### The system learns from its own mistakes
+`engine/meta_learning.py:MetaLearningEngine` analyzes contamination logs, confidence history, and deprecation patterns to compute failure profiles and risk scores. It feeds risk-adjusted threshold hints to the adversarial engine, closing the meta-learning loop. All analysis is computed on-demand from existing tables — no new tables, no stored computed values.
+
+### Constructor signatures encode the dependency graph
+- `WisdomEngine(sqlite, vector, lifecycle)` — needs lifecycle
+- `EvolutionEngine(sqlite, vector, config, lifecycle)` — needs config + lifecycle
+- `ExperienceEngine(sqlite, vector)` — no config needed
+- `KnowledgeEngine(sqlite, vector)` — no config needed
+- `RetrievalEngine(sqlite, vector, config)` — needs config for weights/decay
+- `ValidationEngine(sqlite)` — storage only
+- `AdversarialEngine(sqlite, vector)` — needs vector for semantic search
+- `PropagationEngine(sqlite, vector, config)` — needs everything
+- `CoverageEngine(sqlite, vector)` — needs vector for concept extraction
+- `MetaLearningEngine(sqlite, config)` — no vector needed (structured data analysis only)
+
+If you add a dependency, add it to the constructor. If you need config, take config. Do not reach through `self.sqlite` to get something that should be injected.
+
+## Key design decisions and why
+
+| Decision | Why |
+|----------|-----|
+| SQLite + ChromaDB, not Postgres | Zero-dependency local deployment. Portable. WAL mode for concurrent reads. |
+| ONNX MiniLM-L6-v2 via ChromaDB | sentence-transformers doesn't support Python 3.14. ChromaDB bundles ONNX. |
+| Pydantic v2 for all models | Validation, serialization, and schemas from one source. |
+| Asymmetric confidence (failures weigh more) | One counterexample is more informative than one confirmation. Epistemically sound. |
+| Validation discount (0.6x for unvalidated) | The system should not trust itself. External evidence is required for full confidence. |
+| Seeds start EMERGING with confidence 0.5 | Even bundled wisdom must earn its way. Seeds get a validation pass for first promotion only. |
+| DEPRECATED is terminal | No zombie wisdom. Once deprecated, it stays deprecated. This prevents oscillation. |
+| Confidence is multi-dimensional | `overall` is computed from empirical/theoretical/observational via `weighted_score()`. Mutations go through `apply_delta()` targeting the appropriate dimension. This makes confidence provenance traceable. |
+| Meta-learning closes the loop | Failure patterns feed back into adversarial challenge thresholds. The system learns which types/methods/domains fail most. |
+
+## File layout
+
+```
+src/wisdom/
+  __init__.py          # WisdomSystem composition root — start here
+  config.py            # All configuration (weights, thresholds, paths)
+  exceptions.py        # Exception hierarchy
+  logging_config.py    # Structured logging setup
+  models/              # Pydantic v2 data models
+    common.py          # Enums, ConfidenceScore, TradeOff, Relationship
+    experience.py      # Experience (raw DIKW data layer)
+    knowledge.py       # Knowledge (extracted patterns)
+    wisdom.py          # Wisdom (principles with lifecycle)
+  storage/
+    base.py            # Protocol interfaces
+    sqlite_store.py    # All CRUD, schema, migrations (v2: validation + contamination tables)
+    vector_store.py    # ChromaDB wrapper (3 collections: experiences, knowledge, wisdom)
+  engine/
+    lifecycle.py       # THE lifecycle state machine (single source of truth)
+    experience_engine.py
+    knowledge_engine.py
+    wisdom_engine.py   # Delegates lifecycle to LifecycleManager
+    retrieval.py       # Multi-factor scoring with validation discount
+    evolution.py       # Reinforcement loop, delegates lifecycle to LifecycleManager
+    validation.py      # External verification framework
+    adversarial.py     # Devil's advocate challenge battery
+    propagation.py     # Failure cascade through provenance graph
+    coverage.py        # Semantic absence detection
+    triggers.py        # Auto-trigger rules for pipeline automation
+    gap_analysis.py    # Quantity-based gap detection
+    meta_learning.py   # Failure pattern analysis, risk scores, meta-learning loop
+  llm/
+    provider.py        # LLMProvider ABC + ProviderRegistry
+    providers/         # Anthropic, OpenAI, Ollama implementations
+    prompts.py         # Prompt templates + JSON schemas
+    extraction.py      # Experience -> Knowledge (LLM-powered)
+    synthesis.py       # Knowledge -> Wisdom (LLM-powered)
+    injection.py       # Wisdom prompt injection + CLAUDE.md generator
+  cli/
+    app.py             # Main typer app + subcommand registration
+    formatters.py      # Rich tables, panels, color-coded output
+    experience_cmds.py # exp add|list|show|search|delete|stats
+    knowledge_cmds.py  # know extract|list|show|search|validate|delete
+    wisdom_cmds.py     # wis add|synthesize|list|show|search|reinforce|challenge|deprecate|relate|transfer|validate|validation-summary|devil-advocate|provenance|cascade-failure
+    query_cmds.py      # query search|for-task|conflicts
+    analytics_cmds.py  # analytics summary|domains|confidence|health|gaps|audit|coverage
+    io_cmds.py         # io export|import|claude-md
+  mcp_server/
+    server.py          # FastMCP server (15 tools, 3 resources)
+    __main__.py        # python -m wisdom.mcp_server
+  seeds/               # Bundled starter wisdom (YAML)
+tests/
+  conftest.py          # Shared fixtures (system, sqlite, vector, lifecycle)
+  test_models.py       # Model serialization and validation
+  test_storage.py      # SQLite CRUD, migrations, relationships, confidence log
+  test_engines.py      # Experience, knowledge, wisdom, evolution, triggers, gaps
+  test_retrieval.py    # Multi-factor scoring, temporal decay, validation discount
+  test_evolution.py    # Asymmetric confidence, feedback loop, lifecycle transitions
+  test_trust.py        # Validation, adversarial, propagation, coverage (30 tests)
+  test_meta_learning.py # Meta-learning engine (26 tests)
+  test_cli.py          # CLI commands via CliRunner
+  test_mcp.py          # MCP tool logic (without protocol overhead)
+```
+
+## SQLite schema (v2)
+
+7 tables: `experiences`, `knowledge`, `wisdom`, `relationships`, `confidence_log`, `validation_events`, `contamination_log`. Schema lives in `storage/sqlite_store.py`. Migration from v1 to v2 is automatic.
+
+## Testing
+
+```bash
+python -m pytest tests/ -v                    # All 165 tests
+python -m pytest tests/test_trust.py -v       # Trust layer (30 tests)
+python -m pytest tests/test_meta_learning.py -v  # Meta-learning (26 tests)
+python -m pytest tests/ -k "lifecycle"        # Specific tests
+```
+
+Every new engine, every new feature, every bug fix gets a test. The trust layer tests (`test_trust.py`) are the most important — they verify that the system's immune system works: skepticism, challenge, consequence, and absence detection. The meta-learning tests (`test_meta_learning.py`) verify that the system correctly analyzes its own failure patterns.
+
+## What NOT to do
+
+- Do not add lifecycle transition logic outside `engine/lifecycle.py`
+- Do not allow confidence to increase without diminishing returns (`success_factor * (1 - current)`)
+- Do not let self-reported reinforcement count as external validation
+- Do not remove the unvalidated confidence discount from retrieval
+- Do not make DEPRECATED a non-terminal state
+- Do not duplicate the temporal decay formula — use `_compute_temporal_decay()` from `evolution.py`
+- Do not bypass the adversarial engine for promotion convenience
+- Do not store computed values (temporal decay, effective confidence) — compute them at read time
+- Do not set `confidence.overall` directly — it is a computed property. Use `confidence.apply_delta(dimension, delta)` instead
+- Do not add features that weaken the system's skepticism about itself

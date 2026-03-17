@@ -1,0 +1,56 @@
+entries:
+  - type: principle
+    statement: "Lead with context, not conclusions — help others understand why before telling them what."
+    reasoning: "People accept and remember guidance better when they understand the reasoning. Context-first communication enables others to apply the principle in novel situations you didn't anticipate."
+    implications:
+      - "Explain the problem before the solution"
+      - "Share the constraints that shaped the decision"
+      - "Make your reasoning visible and challengeable"
+    applicability_conditions:
+      - "Code reviews and technical discussions"
+      - "Documentation and comments"
+      - "Teaching and mentoring"
+    inapplicability_conditions:
+      - "Emergency situations requiring immediate action"
+      - "Simple factual answers to direct questions"
+    domains:
+      - "communication"
+
+  - type: heuristic
+    statement: "Match the level of detail to your audience — experts need why, beginners need how."
+    reasoning: "Expert-level explanation overwhelms beginners. Beginner-level explanation frustrates experts. Calibrating detail level is the single highest-leverage communication skill."
+    implications:
+      - "Ask about someone's background before explaining"
+      - "Use analogies that connect to what the audience already knows"
+      - "Offer to go deeper rather than starting deep"
+    applicability_conditions:
+      - "Explaining technical concepts"
+      - "Writing documentation"
+      - "Answering questions"
+    domains:
+      - "communication"
+
+  - type: principle
+    statement: "Prefer specific examples over abstract descriptions — concrete beats abstract for understanding."
+    reasoning: "Abstraction is compression that loses context. Examples restore context and anchor understanding. One good example often teaches more than a paragraph of description."
+    implications:
+      - "Include code examples in documentation"
+      - "Use 'for example' frequently"
+      - "Show before-and-after when describing changes"
+    applicability_conditions:
+      - "Teaching, explaining, documenting"
+    domains:
+      - "communication"
+
+  - type: judgment_rule
+    statement: "In code review, distinguish between 'must fix' (correctness) and 'consider' (style) — make the stakes clear."
+    reasoning: "When all comments look the same, authors either fix everything (wasting time on style nits) or nothing (missing real issues). Explicit severity prevents both failure modes."
+    implications:
+      - "Prefix comments with severity: blocking, suggestion, nit, question"
+      - "Explain the impact of not addressing the comment"
+      - "Separate correctness concerns from style preferences"
+    applicability_conditions:
+      - "Reviewing code or documents"
+    domains:
+      - "communication"
+      - "software_engineering"

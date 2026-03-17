@@ -1,0 +1,67 @@
+entries:
+  - type: meta_pattern
+    statement: "Confidence should decrease faster on failure than it increases on success — negative evidence is more informative."
+    reasoning: "A single counterexample can disprove a universal claim, but no amount of confirming examples can prove one. Asymmetric confidence adjustment reflects this fundamental epistemic asymmetry."
+    implications:
+      - "Weight failures more heavily than successes in confidence updates"
+      - "A single well-documented failure should significantly reduce confidence"
+      - "Recovery from low confidence should be gradual and evidence-based"
+    applicability_conditions:
+      - "Updating confidence in any principle or heuristic"
+      - "Evaluating the reliability of advice"
+    domains:
+      - "meta"
+      - "epistemology"
+
+  - type: principle
+    statement: "Wisdom without applicability conditions is just opinion — know when your principles apply and when they don't."
+    reasoning: "Every principle has a context where it's true and a context where it's misleading. The difference between wisdom and dogma is knowing the boundaries."
+    implications:
+      - "Always specify when a principle applies"
+      - "Actively seek counterexamples to your own wisdom"
+      - "Be suspicious of unconditional advice"
+    applicability_conditions:
+      - "Formulating, teaching, or applying any principle"
+    inapplicability_conditions:
+      - "Tautologies and mathematical truths"
+    domains:
+      - "meta"
+
+  - type: principle
+    statement: "The map is not the territory — models are useful simplifications, not truth."
+    reasoning: "All mental models, frameworks, and principles are compressed representations of reality. They're valuable for making decisions but become dangerous when mistaken for the thing they represent."
+    implications:
+      - "Hold models lightly — be ready to discard them"
+      - "Check predictions against reality regularly"
+      - "Multiple conflicting models can all be useful"
+    applicability_conditions:
+      - "Using any framework, mental model, or principle to make decisions"
+    domains:
+      - "meta"
+      - "epistemology"
+
+  - type: heuristic
+    statement: "When two pieces of wisdom conflict, the one with more empirical evidence and narrower scope is likely more reliable."
+    reasoning: "Broad principles sacrifice accuracy for generality. Narrow, well-tested principles sacrifice generality for accuracy. When they conflict, the narrow one is more likely to be correct in its domain."
+    implications:
+      - "Prefer specific, tested wisdom over general platitudes"
+      - "Look at supporting evidence counts, not just confidence scores"
+      - "Context-specific wisdom should override universal wisdom in that context"
+    applicability_conditions:
+      - "Resolving conflicts between competing wisdom entries"
+    domains:
+      - "meta"
+
+  - type: meta_pattern
+    statement: "Learning compounds — each new piece of knowledge becomes easier to integrate when you have more context."
+    reasoning: "Knowledge forms a network. New knowledge connects to existing nodes, making both stronger and more retrievable. This is why domain experts learn new things in their domain faster than novices."
+    implications:
+      - "Invest in foundational understanding before advanced topics"
+      - "Actively connect new learning to existing knowledge"
+      - "Don't expect linear learning curves — expect exponential after initial investment"
+    applicability_conditions:
+      - "Learning any new domain or skill"
+      - "Planning a learning curriculum"
+    domains:
+      - "meta"
+      - "learning"
