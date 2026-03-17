@@ -1,5 +1,16 @@
 # Session Notes
 
+## Current state (as of 2026-03-17)
+- **188 tests**, all green, Python 3.14
+- Git repo initialized, 4 commits on `master`
+- `pip install -e ".[dev]"` works, CLI entry point `wisdom` works
+- MCP server imports and starts cleanly (untested with real MCP client)
+- All 6 relationship types wired into retrieval + propagation
+- Content-hash dedup operational for cross-system import
+- LLM pipeline wired but untested against real models
+
+---
+
 ## 2026-03-15 — Initial Build + Trust Layer
 
 ### What was built
@@ -8,13 +19,6 @@
 - Trust layer: Validation, Adversarial, Propagation, Coverage engines
 - CLI with 40+ commands, MCP server with 15 tools + 3 resources
 - 19 seed wisdom entries across 4 packs
-
-### Current state
-- All 136 tests green
-- `pip install -e ".[dev]"` works
-- CLI entry point `wisdom` works
-- MCP server imports and starts cleanly
-- No git repo yet (has .gitignore, needs `git init`)
 
 ### Bugs fixed this session
 - Lifecycle state machine was duplicated in evolution.py and wisdom_engine.py — consolidated into lifecycle.py
