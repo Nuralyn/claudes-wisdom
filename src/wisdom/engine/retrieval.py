@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from wisdom.config import WisdomConfig
 from wisdom.engine.evolution import _compute_temporal_decay
 from wisdom.logging_config import get_logger
-from wisdom.models.common import LifecycleState
+from wisdom.models.common import LifecycleState, RelationshipType
 from wisdom.models.knowledge import Knowledge
 from wisdom.models.wisdom import Wisdom
 from wisdom.storage.sqlite_store import SQLiteStore
@@ -263,7 +263,12 @@ class RetrievalEngine:
             query=query, domain=domain, top_k=top_k, layers=["wisdom"]
         )
         if not results:
-            return {"entries": [], "composition": "No relevant wisdom found.", "conflicts": []}
+            return {
+                "entries": [],
+                "composition": "No relevant wisdom found.",
+                "conflicts": [],
+                "relationships": [],
+            }
 
         entries = []
         conflict_pairs = []
@@ -285,20 +290,48 @@ class RetrievalEngine:
                 entry["applies_when"] = r.entity.applicability_conditions
             entries.append(entry)
 
-        # Check for conflicts between returned entries
-        for i, r1 in enumerate(results):
-            for j, r2 in enumerate(results):
-                if j <= i:
+        # Find all relationships between returned entries
+        result_ids = {r.entity.id for r in results}
+        id_to_index = {r.entity.id: i + 1 for i, r in enumerate(results)}
+        seen_rel_ids: set[str] = set()
+        relationship_notes: list[str] = []
+
+        _NOTE_TEMPLATES = {
+            RelationshipType.SUPPORTS: "Entry [{a}] supports Entry [{b}]",
+            RelationshipType.COMPLEMENTS: "Entries [{a}] and [{b}] complement each other",
+            RelationshipType.GENERALIZES: "Entry [{a}] is a general form of Entry [{b}]",
+            RelationshipType.SPECIALIZES: "Entry [{a}] is a specific case of Entry [{b}]",
+            RelationshipType.DERIVED_FROM: "Entry [{a}] is derived from Entry [{b}]",
+        }
+
+        for r in results:
+            rels = self.sqlite.get_relationships(r.entity.id, "wisdom")
+            for rel in rels:
+                if rel.id in seen_rel_ids:
                     continue
-                rels = self.sqlite.find_conflicts(r1.entity.id)
-                for rel in rels:
-                    other_id = rel.target_id if rel.source_id == r1.entity.id else rel.source_id
-                    if other_id == r2.entity.id:
-                        conflict_pairs.append({
-                            "a": i + 1,
-                            "b": j + 1,
-                            "note": f"Entries [{i+1}] and [{j+1}] may conflict",
-                        })
+                seen_rel_ids.add(rel.id)
+
+                other_id = (
+                    rel.target_id if rel.source_id == r.entity.id else rel.source_id
+                )
+                if other_id not in result_ids:
+                    continue
+
+                a_idx = id_to_index[rel.source_id]
+                b_idx = id_to_index[rel.target_id]
+
+                if rel.relationship == RelationshipType.CONFLICTS:
+                    conflict_pairs.append({
+                        "a": a_idx,
+                        "b": b_idx,
+                        "note": f"Entries [{a_idx}] and [{b_idx}] may conflict",
+                    })
+                else:
+                    template = _NOTE_TEMPLATES.get(rel.relationship)
+                    if template:
+                        relationship_notes.append(
+                            template.format(a=a_idx, b=b_idx)
+                        )
 
         # Build composition text
         lines = []
@@ -314,8 +347,11 @@ class RetrievalEngine:
 
         if conflict_pairs:
             for cp in conflict_pairs:
-                lines.append(f"NOTE: {cp['note']}")
-        elif len(entries) > 1:
+                lines.append(f"WARNING: {cp['note']}")
+        if relationship_notes:
+            for note in relationship_notes:
+                lines.append(f"RELATIONSHIP: {note}")
+        if not conflict_pairs and not relationship_notes and len(entries) > 1:
             lines.append(
                 f"NOTE: Entries [{', '.join(str(e['index']) for e in entries)}] appear complementary."
             )
@@ -324,4 +360,5 @@ class RetrievalEngine:
             "entries": entries,
             "composition": "\n".join(lines),
             "conflicts": conflict_pairs,
+            "relationships": relationship_notes,
         }

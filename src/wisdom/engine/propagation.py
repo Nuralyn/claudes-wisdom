@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from wisdom.config import WisdomConfig
 from wisdom.logging_config import get_logger
-from wisdom.models.common import LifecycleState
+from wisdom.models.common import LifecycleState, Relationship, RelationshipType
 from wisdom.models.wisdom import Wisdom
 from wisdom.storage.sqlite_store import SQLiteStore
 from wisdom.storage.vector_store import VectorStore
@@ -30,11 +30,17 @@ class ContaminationResult:
         self.affected_wisdom: list[dict] = []
         self.affected_knowledge: list[dict] = []
         self.contaminated_experiences: int = 0
+        self.relationship_affected: list[dict] = []
         self.total_penalty_events: int = 0
 
     @property
     def total_affected(self) -> int:
-        return len(self.affected_wisdom) + len(self.affected_knowledge) + self.contaminated_experiences
+        return (
+            len(self.affected_wisdom)
+            + len(self.affected_knowledge)
+            + self.contaminated_experiences
+            + len(self.relationship_affected)
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -42,6 +48,7 @@ class ContaminationResult:
             "affected_wisdom": self.affected_wisdom,
             "affected_knowledge": self.affected_knowledge,
             "contaminated_experiences": self.contaminated_experiences,
+            "relationship_affected": self.relationship_affected,
             "total_affected": self.total_affected,
             "total_penalty_events": self.total_penalty_events,
         }
@@ -54,6 +61,56 @@ class PropagationEngine:
         self.sqlite = sqlite
         self.vector = vector
         self.config = config
+
+    def _relationship_penalty(
+        self, rel: Relationship, failed_id: str, severity: float
+    ) -> float:
+        """Compute the penalty for a related wisdom entry when wisdom fails.
+
+        The penalty depends on the relationship type and directionality.
+        These are intentionally lighter than provenance-based penalties —
+        relationships are softer connections than shared knowledge.
+        """
+        is_source = rel.source_id == failed_id
+        rtype = rel.relationship
+
+        if rtype == RelationshipType.SUPPORTS:
+            if is_source:
+                # Failed wisdom supported the other → other loses backing
+                return rel.strength * severity * 0.03
+            # Other supported failed wisdom → other is fine
+            return 0.0
+
+        if rtype == RelationshipType.DERIVED_FROM:
+            if is_source:
+                # Failed wisdom was derived from other → other might be flawed
+                return rel.strength * severity * 0.02
+            # Other was derived from failed wisdom → suspect
+            return rel.strength * severity * 0.05
+
+        if rtype == RelationshipType.GENERALIZES:
+            if is_source:
+                # Failed general rule; specific cases might still hold
+                return 0.0
+            # Other generalizes failed wisdom → very mild
+            return rel.strength * severity * 0.01
+
+        if rtype == RelationshipType.SPECIALIZES:
+            if is_source:
+                # Failed specific case weakens the general version
+                return rel.strength * severity * 0.02
+            # Other specializes failed wisdom → specific might still hold
+            return 0.0
+
+        if rtype == RelationshipType.COMPLEMENTS:
+            # Symmetric: complement loses context
+            return rel.strength * severity * 0.02
+
+        if rtype == RelationshipType.CONFLICTS:
+            # Conflict with failed wisdom is a positive signal for the other
+            return 0.0
+
+        return 0.0
 
     def cascade_failure(self, wisdom_id: str, severity: float = 1.0) -> ContaminationResult:
         """Cascade the consequences of a wisdom failure through the provenance graph.
@@ -183,11 +240,65 @@ class PropagationEngine:
         result.contaminated_experiences = len(contaminated_exps)
         result.total_penalty_events += len(contaminated_exps)
 
+        # 4. Cascade through explicit relationships (lighter than provenance)
+        already_penalized = {d["id"] for d in result.affected_wisdom}
+        rels = self.sqlite.get_relationships(wisdom_id, "wisdom")
+        for rel in rels:
+            other_id = (
+                rel.target_id if rel.source_id == wisdom_id else rel.source_id
+            )
+            if other_id in already_penalized or other_id == wisdom_id:
+                continue
+
+            penalty = self._relationship_penalty(rel, wisdom_id, severity)
+            if penalty <= 0:
+                continue
+
+            other = self.sqlite.get_wisdom(other_id)
+            if not other or other.lifecycle == LifecycleState.DEPRECATED:
+                continue
+
+            old_conf = other.confidence.overall
+            other.confidence.apply_delta("empirical", -penalty)
+            other.touch()
+            self.sqlite.update_wisdom(other)
+
+            self.sqlite.log_confidence_change(
+                "wisdom", other.id, old_conf, other.confidence.overall,
+                "relationship_cascade",
+                f"{rel.relationship.value} relationship with failed wisdom {wisdom_id}",
+            )
+            self.sqlite.log_contamination(
+                source_wisdom_id=wisdom_id,
+                affected_entity_id=other.id,
+                affected_entity_type="wisdom",
+                penalty_applied=penalty,
+                reason=f"{rel.relationship.value} relationship cascade",
+            )
+
+            result.relationship_affected.append({
+                "id": other.id,
+                "statement": other.statement[:60],
+                "relationship": rel.relationship.value,
+                "strength": rel.strength,
+                "penalty": round(penalty, 4),
+                "new_confidence": round(other.confidence.overall, 3),
+            })
+            result.total_penalty_events += 1
+
+            logger.info(
+                "Relationship cascade: wisdom %s penalized %.4f "
+                "(%s relationship with %s)",
+                other.id, penalty, rel.relationship.value, wisdom_id,
+            )
+
         logger.info(
             "Contamination cascade from wisdom %s: "
-            "%d wisdom, %d knowledge, %d experiences affected",
+            "%d wisdom (provenance), %d knowledge, %d experiences, "
+            "%d wisdom (relationships) affected",
             wisdom_id, len(result.affected_wisdom),
             len(result.affected_knowledge), result.contaminated_experiences,
+            len(result.relationship_affected),
         )
         return result
 
@@ -239,6 +350,23 @@ class PropagationEngine:
         # Find contamination history
         contamination = self.sqlite.get_contamination_history(wisdom_id)
 
+        # Find explicit relationships
+        rels = self.sqlite.get_relationships(wisdom_id, "wisdom")
+        related = []
+        for rel in rels:
+            other_id = (
+                rel.target_id if rel.source_id == wisdom_id else rel.source_id
+            )
+            other = self.sqlite.get_wisdom(other_id)
+            if other:
+                related.append({
+                    "id": other.id,
+                    "statement": other.statement[:60],
+                    "relationship": rel.relationship.value,
+                    "strength": rel.strength,
+                    "direction": "outgoing" if rel.source_id == wisdom_id else "incoming",
+                })
+
         return {
             "wisdom": {
                 "id": w.id,
@@ -249,5 +377,6 @@ class PropagationEngine:
             },
             "source_knowledge": knowledge_chain,
             "applications": applications,
+            "relationships": related,
             "contamination_history": contamination[:20],
         }

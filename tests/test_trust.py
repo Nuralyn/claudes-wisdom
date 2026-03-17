@@ -23,6 +23,7 @@ from wisdom.models.common import (
     ExperienceResult,
     KnowledgeType,
     LifecycleState,
+    RelationshipType,
     WisdomType,
 )
 from wisdom.models.experience import Experience
@@ -476,6 +477,204 @@ class TestPropagation:
 
         history = sqlite.get_contamination_history(w.id)
         assert len(history) >= 1
+
+
+# ── Relationship Cascade Tests ─────────────────────────────────────────────
+
+
+class TestRelationshipCascade:
+    """Tests for relationship-based failure propagation."""
+
+    def test_cascade_through_supports(self, propagation, wis_engine):
+        """When A supports B and A fails, B should lose backing."""
+        w_supporter = wis_engine.add(
+            statement="Supporting evidence principle",
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        w_supported = wis_engine.add(
+            statement="Principle that depends on support",
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        wis_engine.relate(
+            w_supporter.id, w_supported.id, RelationshipType.SUPPORTS, 0.8
+        )
+
+        result = propagation.cascade_failure(w_supporter.id, severity=1.0)
+
+        assert len(result.relationship_affected) >= 1
+        affected_ids = [a["id"] for a in result.relationship_affected]
+        assert w_supported.id in affected_ids
+
+        w_after = wis_engine.get(w_supported.id)
+        assert w_after.confidence.overall < 0.7
+
+    def test_no_penalty_when_supported_fails(self, propagation, wis_engine):
+        """When A supports B and B fails, A should not be penalized."""
+        w_supporter = wis_engine.add(
+            statement="I provide evidence for another",
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        w_supported = wis_engine.add(
+            statement="I am supported but will fail",
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        wis_engine.relate(
+            w_supporter.id, w_supported.id, RelationshipType.SUPPORTS, 0.9
+        )
+
+        result = propagation.cascade_failure(w_supported.id, severity=1.0)
+
+        # The supporter should not be penalized
+        supporter_affected = [
+            a for a in result.relationship_affected if a["id"] == w_supporter.id
+        ]
+        assert len(supporter_affected) == 0
+        w_supporter_after = wis_engine.get(w_supporter.id)
+        assert abs(w_supporter_after.confidence.overall - 0.7) < 0.001
+
+    def test_cascade_through_derived_from(self, propagation, wis_engine):
+        """When A is derived_from B and B fails, A should be penalized (suspect source)."""
+        w_source = wis_engine.add(
+            statement="Original principle",
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        w_derived = wis_engine.add(
+            statement="Derived from the original",
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        # w_derived DERIVED_FROM w_source
+        wis_engine.relate(
+            w_derived.id, w_source.id, RelationshipType.DERIVED_FROM, 0.9
+        )
+
+        # Source fails → derived is suspect
+        result = propagation.cascade_failure(w_source.id, severity=1.0)
+
+        affected_ids = [a["id"] for a in result.relationship_affected]
+        assert w_derived.id in affected_ids
+        w_derived_after = wis_engine.get(w_derived.id)
+        assert w_derived_after.confidence.overall < 0.7
+
+    def test_cascade_through_complements(self, propagation, wis_engine):
+        """When A complements B and A fails, B should get a mild penalty."""
+        w1 = wis_engine.add(
+            statement="Complementary principle A",
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        w2 = wis_engine.add(
+            statement="Complementary principle B",
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        wis_engine.relate(w1.id, w2.id, RelationshipType.COMPLEMENTS, 0.8)
+
+        result = propagation.cascade_failure(w1.id, severity=1.0)
+
+        affected_ids = [a["id"] for a in result.relationship_affected]
+        assert w2.id in affected_ids
+        w2_after = wis_engine.get(w2.id)
+        assert w2_after.confidence.overall < 0.7
+
+    def test_conflict_gives_no_penalty(self, propagation, wis_engine):
+        """When A conflicts with B and A fails, B should NOT be penalized.
+
+        The failure of a conflicting entry is actually a positive signal.
+        """
+        w_bad = wis_engine.add(
+            statement="Wrong principle",
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        w_rival = wis_engine.add(
+            statement="Rival principle that conflicts",
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        wis_engine.relate(w_bad.id, w_rival.id, RelationshipType.CONFLICTS, 0.9)
+
+        result = propagation.cascade_failure(w_bad.id, severity=1.0)
+
+        # The rival should not be penalized
+        rival_affected = [
+            a for a in result.relationship_affected if a["id"] == w_rival.id
+        ]
+        assert len(rival_affected) == 0
+        w_rival_after = wis_engine.get(w_rival.id)
+        assert abs(w_rival_after.confidence.overall - 0.7) < 0.001
+
+    def test_relationship_penalties_lighter_than_provenance(
+        self, propagation, wis_engine, know_engine
+    ):
+        """Relationship-based penalties should be lighter than provenance-based ones."""
+        k = Knowledge(statement="Shared source", domain="test")
+        know_engine.add(k)
+
+        w_failed = wis_engine.add(
+            statement="Failed wisdom",
+            source_knowledge_ids=[k.id],
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        w_sibling = wis_engine.add(
+            statement="Sibling via knowledge overlap",
+            source_knowledge_ids=[k.id],
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        w_related = wis_engine.add(
+            statement="Related via supports relationship",
+            confidence=ConfidenceScore(overall=0.7),
+        )
+        wis_engine.relate(
+            w_failed.id, w_related.id, RelationshipType.SUPPORTS, 1.0
+        )
+
+        result = propagation.cascade_failure(w_failed.id, severity=1.0)
+
+        # Both should be penalized
+        sibling_penalty = next(
+            (a["penalty"] for a in result.affected_wisdom if a["id"] == w_sibling.id),
+            0,
+        )
+        rel_penalty = next(
+            (a["penalty"] for a in result.relationship_affected if a["id"] == w_related.id),
+            0,
+        )
+
+        # Relationship penalty should be strictly lighter
+        assert rel_penalty > 0
+        assert sibling_penalty > 0
+        assert rel_penalty < sibling_penalty
+
+    def test_relationship_cascade_logged(self, propagation, wis_engine, sqlite):
+        """Relationship cascades should be logged in contamination_log."""
+        w1 = wis_engine.add(statement="Will fail", confidence=ConfidenceScore(overall=0.7))
+        w2 = wis_engine.add(statement="Supported", confidence=ConfidenceScore(overall=0.7))
+        wis_engine.relate(w1.id, w2.id, RelationshipType.SUPPORTS, 0.8)
+
+        propagation.cascade_failure(w1.id, severity=1.0)
+
+        history = sqlite.get_contamination_history(w1.id)
+        rel_entries = [h for h in history if "relationship" in h.get("reason", "")]
+        assert len(rel_entries) >= 1
+
+    def test_provenance_includes_relationships(self, propagation, wis_engine):
+        """trace_provenance should include relationship information."""
+        w1 = wis_engine.add(statement="Main principle", domains=["test"])
+        w2 = wis_engine.add(statement="Supporting principle", domains=["test"])
+        wis_engine.relate(w1.id, w2.id, RelationshipType.SUPPORTS, 0.8)
+
+        prov = propagation.trace_provenance(w1.id)
+        assert "relationships" in prov
+        assert len(prov["relationships"]) >= 1
+        assert prov["relationships"][0]["relationship"] == "supports"
+
+    def test_total_affected_includes_relationships(self, propagation, wis_engine):
+        """ContaminationResult.total_affected should count relationship-affected entries."""
+        w1 = wis_engine.add(statement="Fails", confidence=ConfidenceScore(overall=0.7))
+        w2 = wis_engine.add(statement="Supported", confidence=ConfidenceScore(overall=0.7))
+        wis_engine.relate(w1.id, w2.id, RelationshipType.SUPPORTS, 0.8)
+
+        result = propagation.cascade_failure(w1.id, severity=1.0)
+        assert result.total_affected >= 1
+        assert len(result.relationship_affected) >= 1
+        d = result.to_dict()
+        assert "relationship_affected" in d
 
 
 # ── Coverage Tests ──────────────────────────────────────────────────────────
