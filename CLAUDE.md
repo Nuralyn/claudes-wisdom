@@ -14,7 +14,7 @@ pip install -e ".[mcp]"       # MCP server support
 pip install -e ".[all]"       # Everything including LLM providers
 
 wisdom --help                 # CLI
-python -m pytest tests/ -v    # Tests (165 tests, all must pass)
+python -m pytest tests/ -v    # Tests (188 tests, all must pass)
 python -m wisdom.mcp_server   # MCP server (stdio)
 
 WISDOM_DATA_DIR=/path/to/data wisdom init --seed all   # Bootstrap
@@ -57,7 +57,7 @@ WisdomSystem (composition root: src/wisdom/__init__.py)
 Unvalidated wisdom gets a 40% confidence discount at retrieval time (`engine/retrieval.py`). Pipeline-created wisdom cannot be promoted to ESTABLISHED without external validation (`engine/lifecycle.py:_has_validation`). This is not a feature flag. This is the system's epistemology. Do not weaken it.
 
 ### Failures have real consequences
-When wisdom is deprecated or found wrong, `engine/propagation.py:cascade_failure()` traces the provenance graph and applies penalties to sibling wisdom (proportional to knowledge overlap), source knowledge entries, and application experiences (marked contaminated). This is the immune response. A confidence score dropping by 0.08 is bookkeeping; contaminating 50 downstream entries is a consequence.
+When wisdom is deprecated or found wrong, `engine/propagation.py:cascade_failure()` traces the provenance graph and applies penalties to sibling wisdom (proportional to knowledge overlap), source knowledge entries, and application experiences (marked contaminated). It also cascades through explicit relationships (SUPPORTS, DERIVED_FROM, COMPLEMENTS, etc.) with directional penalty logic — the semantics of the relationship determine who gets penalized and how much. Relationship penalties are intentionally lighter than provenance penalties (relationships are softer signals). Conflicting wisdom is NOT penalized — the failure of a rival is a positive signal. This is the immune response. A confidence score dropping by 0.08 is bookkeeping; contaminating 50 downstream entries is a consequence.
 
 ### The adversarial engine fights back
 `engine/adversarial.py` runs five challenge batteries: counterexample search, vagueness detection, contradiction scan, blind spot detection, untested condition check. Wisdom that fails (any critical finding) does not receive adversarial validation. Do not soften the checks. The adversarial engine accepts an optional `risk_profile` dict from MetaLearningEngine to adjust its thresholds for high-risk profiles — but has zero import dependency on it.
@@ -98,6 +98,8 @@ If you add a dependency, add it to the constructor. If you need config, take con
 | DEPRECATED is terminal | No zombie wisdom. Once deprecated, it stays deprecated. This prevents oscillation. |
 | Confidence is multi-dimensional | `overall` is computed from empirical/theoretical/observational via `weighted_score()`. Mutations go through `apply_delta()` targeting the appropriate dimension. This makes confidence provenance traceable. |
 | Meta-learning closes the loop | Failure patterns feed back into adversarial challenge thresholds. The system learns which types/methods/domains fail most. |
+| Relationship cascade is directional | If A SUPPORTS B and A fails, B loses backing. If A CONFLICTS with B and A fails, B is vindicated (no penalty). Penalty magnitudes (0.01–0.05) are lighter than provenance penalties (up to 0.1) because relationships are softer signals than shared knowledge. |
+| Content-hash dedup for import | SHA-256 of (statement + reasoning) enables cross-system dedup when IDs differ. Hashes are computed at import time, not stored — consistent with compute-at-read-time principle. |
 
 ## File layout
 
@@ -121,11 +123,11 @@ src/wisdom/
     experience_engine.py
     knowledge_engine.py
     wisdom_engine.py   # Delegates lifecycle to LifecycleManager
-    retrieval.py       # Multi-factor scoring with validation discount
+    retrieval.py       # Multi-factor scoring with validation discount + relationship-aware composition
     evolution.py       # Reinforcement loop, delegates lifecycle to LifecycleManager
     validation.py      # External verification framework
     adversarial.py     # Devil's advocate challenge battery
-    propagation.py     # Failure cascade through provenance graph
+    propagation.py     # Failure cascade through provenance graph + relationship graph
     coverage.py        # Semantic absence detection
     triggers.py        # Auto-trigger rules for pipeline automation
     gap_analysis.py    # Quantity-based gap detection
@@ -170,9 +172,10 @@ tests/
 ## Testing
 
 ```bash
-python -m pytest tests/ -v                    # All 165 tests
-python -m pytest tests/test_trust.py -v       # Trust layer (30 tests)
+python -m pytest tests/ -v                    # All 188 tests
+python -m pytest tests/test_trust.py -v       # Trust layer (39 tests)
 python -m pytest tests/test_meta_learning.py -v  # Meta-learning (26 tests)
+python -m pytest tests/test_retrieval.py -v   # Retrieval + composition (17 tests)
 python -m pytest tests/ -k "lifecycle"        # Specific tests
 ```
 

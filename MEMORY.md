@@ -48,6 +48,30 @@ The confidence model refactoring solved the dead `weighted_score()` problem and 
 
 ### Known edges
 - LLM pipeline still untested against real models
-- No git repo yet
-- MCP server tested via real session but relationship graph still underutilized
+- ~~No git repo yet~~ FIXED 2026-03-16
+- ~~MCP server tested via real session but relationship graph still underutilized~~ FIXED 2026-03-16
 - Coverage engine concept extraction still naive (whitespace splitting)
+
+## 2026-03-16 — Relationship Graph + Content Hash Dedup + Fixes
+
+### What was built
+- **Git initialized** — first commit with 70 files, 10,970 lines
+- **Relationship graph fully wired** — all 6 relationship types (SUPPORTS, COMPLEMENTS, GENERALIZES, SPECIALIZES, DERIVED_FROM, CONFLICTS) now operational in both retrieval and propagation
+- **compose_wisdom()** discovers and annotates relationships between result entries with typed notes (was only detecting CONFLICTS)
+- **cascade_failure()** traces explicit relationships with directional penalty logic — relationship semantics respected (supporting a failed entry penalizes you; conflicting with a failed entry does not)
+- **trace_provenance()** now includes relationship information in output
+- **Content-hash dedup for import** — merge mode detects duplicates by SHA-256 content hash, enabling cross-system dedup when IDs differ
+- **gap_analysis.py** no longer uses raw SQL — added get_task_type_counts() and count_wisdom_mentioning() to store API
+- **analytics audit --since** handles invalid input gracefully (falls back to 7d with warning)
+- 23 new tests: 9 relationship cascade, 7 relationship composition, 7 content-hash dedup
+- Total: 188 tests, all passing
+
+### Key design insight
+Relationship cascade penalties must respect directionality and be lighter than provenance-based penalties. If A SUPPORTS B and A fails, B loses backing. But if B fails, A is fine — it was providing valid evidence for something that turned out wrong. Conflicts are positive signals: if A conflicts with B and A fails, B is vindicated. Penalty magnitudes (0.01–0.05 per relationship) are intentionally weaker than provenance overlap penalties (up to 0.1), because relationships are softer connections than shared knowledge derivation.
+
+### Known edges remaining
+- LLM pipeline still untested against real models
+- MCP server needs real-world client testing
+- Wisdom.relationships field still denormalized (JSON on model + relationships table)
+- Coverage engine concept extraction still naive (whitespace splitting)
+- Meta-learning could be exposed as MCP tools
