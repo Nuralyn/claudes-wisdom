@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,27 @@ import typer
 from rich.console import Console
 
 from wisdom.cli.formatters import console
+
+
+def _content_hash(entity) -> str:
+    """Compute a content hash for deduplication across systems.
+
+    Hashes the immutable content fields so identical entries can be
+    detected even when their IDs differ between source and target systems.
+    """
+    from wisdom.models.experience import Experience
+    from wisdom.models.knowledge import Knowledge
+    from wisdom.models.wisdom import Wisdom
+
+    if isinstance(entity, Wisdom):
+        content = f"wisdom:{entity.statement}:{entity.reasoning}"
+    elif isinstance(entity, Knowledge):
+        content = f"knowledge:{entity.statement}:{entity.domain}"
+    elif isinstance(entity, Experience):
+        content = f"experience:{entity.description}:{entity.domain}"
+    else:
+        content = f"unknown:{entity!r}"
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 io_app = typer.Typer(help="Import and export wisdom data")
 
@@ -108,45 +130,76 @@ def import_cmd(
             for w in system.wisdom.list(limit=100000):
                 system.wisdom.delete(w.id)
 
-        # Import experiences
+        # Import experiences, knowledge, wisdom with content-hash dedup
         from wisdom.models.experience import Experience
         from wisdom.models.knowledge import Knowledge
         from wisdom.models.wisdom import Wisdom
 
+        # Build content-hash sets for existing entries (enables cross-system dedup)
+        existing_hashes: set[str] = set()
+        skipped = {"exp": 0, "know": 0, "wis": 0}
+        if mode == "merge":
+            incoming_layers = set()
+            if data.get("experiences"):
+                incoming_layers.add("experiences")
+            if data.get("knowledge"):
+                incoming_layers.add("knowledge")
+            if data.get("wisdom"):
+                incoming_layers.add("wisdom")
+
+            if "experiences" in incoming_layers:
+                for e in system.experiences.list(limit=100000):
+                    existing_hashes.add(_content_hash(e))
+            if "knowledge" in incoming_layers:
+                for k in system.knowledge.list(limit=100000):
+                    existing_hashes.add(_content_hash(k))
+            if "wisdom" in incoming_layers:
+                for w in system.wisdom.list(limit=100000):
+                    existing_hashes.add(_content_hash(w))
+
         exp_count = 0
         for exp_data in data.get("experiences", []):
             exp = Experience(**exp_data)
-            existing = system.experiences.get(exp.id)
-            if mode == "merge" and existing:
-                continue  # Skip duplicates
+            if mode == "merge":
+                if system.experiences.get(exp.id) or _content_hash(exp) in existing_hashes:
+                    skipped["exp"] += 1
+                    continue
             system.sqlite.save_experience(exp)
             system.vector.add("experience", exp.id, exp.embedding_text, {"domain": exp.domain})
+            existing_hashes.add(_content_hash(exp))
             exp_count += 1
 
         know_count = 0
         for k_data in data.get("knowledge", []):
             k = Knowledge(**k_data)
-            existing = system.knowledge.get(k.id)
-            if mode == "merge" and existing:
-                continue
+            if mode == "merge":
+                if system.knowledge.get(k.id) or _content_hash(k) in existing_hashes:
+                    skipped["know"] += 1
+                    continue
             system.sqlite.save_knowledge(k)
             system.vector.add("knowledge", k.id, k.embedding_text, {"domain": k.domain})
+            existing_hashes.add(_content_hash(k))
             know_count += 1
 
         wis_count = 0
         for w_data in data.get("wisdom", []):
             w = Wisdom(**w_data)
-            existing = system.wisdom.get(w.id)
-            if mode == "merge" and existing:
-                continue
+            if mode == "merge":
+                if system.wisdom.get(w.id) or _content_hash(w) in existing_hashes:
+                    skipped["wis"] += 1
+                    continue
             system.sqlite.save_wisdom(w)
             system.vector.add("wisdom", w.id, w.embedding_text, {"domains": ",".join(w.applicable_domains)})
+            existing_hashes.add(_content_hash(w))
             wis_count += 1
 
+        total_skipped = skipped["exp"] + skipped["know"] + skipped["wis"]
         console.print(f"[green]Import complete ({mode} mode):[/]")
         console.print(f"  Experiences: {exp_count}")
         console.print(f"  Knowledge: {know_count}")
         console.print(f"  Wisdom: {wis_count}")
+        if total_skipped > 0:
+            console.print(f"  [dim]Skipped {total_skipped} duplicates (by ID or content hash)[/]")
     finally:
         system.close()
 

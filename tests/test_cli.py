@@ -141,3 +141,118 @@ class TestIOCLI:
         output_path = str(tmp_path / "CLAUDE.md")
         result = runner.invoke(app, ["io", "claude-md", "--output", output_path])
         assert result.exit_code == 0
+
+    def test_content_hash_dedup(self, tmp_path):
+        """Import should skip entries with identical content even if IDs differ."""
+        import json
+
+        # Add wisdom
+        runner.invoke(app, [
+            "wis", "add", "Content hash test principle",
+            "--reasoning", "Testing dedup",
+            "--domains", "test",
+        ])
+
+        # Export
+        export_path = str(tmp_path / "export.json")
+        runner.invoke(app, ["io", "export", export_path])
+
+        # Modify IDs in the export to simulate a different source system
+        pack = json.loads(open(export_path, encoding="utf-8").read())
+        for w in pack.get("wisdom", []):
+            w["id"] = "different_id_" + w["id"][:8]
+        modified_path = str(tmp_path / "modified.json")
+        with open(modified_path, "w", encoding="utf-8") as f:
+            json.dump(pack, f)
+
+        # Import — content-hash dedup should catch the duplicate
+        result = runner.invoke(app, ["io", "import", modified_path, "--mode", "merge"])
+        assert result.exit_code == 0
+        assert "Wisdom: 0" in result.output or "Skipped" in result.output
+
+    def test_import_merge_no_false_dedup(self, tmp_path):
+        """Import should NOT skip entries with genuinely different content."""
+        import json
+
+        runner.invoke(app, [
+            "wis", "add", "Original principle about testing",
+            "--reasoning", "First reasoning",
+            "--domains", "test",
+        ])
+
+        # Create a pack with different content
+        pack = {
+            "version": "1.0",
+            "experiences": [],
+            "knowledge": [],
+            "wisdom": [{
+                "id": "totally_new_id",
+                "statement": "A completely different principle about deployment",
+                "reasoning": "Different reasoning entirely",
+                "type": "principle",
+                "applicable_domains": ["deployment"],
+                "applicability_conditions": [],
+                "inapplicability_conditions": [],
+                "trade_offs": [],
+                "confidence": {"empirical": 0.5, "theoretical": 0.5, "observational": 0.5},
+                "lifecycle": "emerging",
+                "application_count": 0,
+                "version": 1,
+                "source_knowledge_ids": [],
+                "relationships": [],
+                "deprecation_reason": "",
+                "creation_method": "human_input",
+                "tags": [],
+                "metadata": {},
+            }],
+        }
+        pack_path = str(tmp_path / "new_content.json")
+        with open(pack_path, "w", encoding="utf-8") as f:
+            json.dump(pack, f)
+
+        result = runner.invoke(app, ["io", "import", pack_path, "--mode", "merge"])
+        assert result.exit_code == 0
+        assert "Wisdom: 1" in result.output
+
+
+class TestContentHash:
+    """Unit tests for the content hash function."""
+
+    def test_hash_deterministic(self):
+        from wisdom.cli.io_cmds import _content_hash
+        from wisdom.models.wisdom import Wisdom
+
+        w = Wisdom(statement="Test", reasoning="Why")
+        assert _content_hash(w) == _content_hash(w)
+
+    def test_hash_differs_by_content(self):
+        from wisdom.cli.io_cmds import _content_hash
+        from wisdom.models.wisdom import Wisdom
+
+        w1 = Wisdom(statement="Test A", reasoning="Why A")
+        w2 = Wisdom(statement="Test B", reasoning="Why B")
+        assert _content_hash(w1) != _content_hash(w2)
+
+    def test_hash_ignores_id(self):
+        from wisdom.cli.io_cmds import _content_hash
+        from wisdom.models.wisdom import Wisdom
+
+        w1 = Wisdom(id="aaa", statement="Same", reasoning="Same")
+        w2 = Wisdom(id="bbb", statement="Same", reasoning="Same")
+        assert _content_hash(w1) == _content_hash(w2)
+
+    def test_hash_knowledge(self):
+        from wisdom.cli.io_cmds import _content_hash
+        from wisdom.models.knowledge import Knowledge
+
+        k1 = Knowledge(statement="Caching helps", domain="perf")
+        k2 = Knowledge(id="other", statement="Caching helps", domain="perf")
+        assert _content_hash(k1) == _content_hash(k2)
+
+    def test_hash_experience(self):
+        from wisdom.cli.io_cmds import _content_hash
+        from wisdom.models.experience import Experience
+
+        e1 = Experience(description="Debugged a leak", domain="python")
+        e2 = Experience(id="other", description="Debugged a leak", domain="python")
+        assert _content_hash(e1) == _content_hash(e2)
