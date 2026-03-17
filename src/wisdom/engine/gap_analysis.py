@@ -50,20 +50,13 @@ class GapAnalysisEngine:
 
     def find_low_coverage_tasks(self) -> list[dict]:
         """Find task types frequently seen in experiences but with no applicable wisdom."""
-        # Get all distinct task types from experiences
-        rows = self.sqlite.conn.execute(
-            "SELECT task_type, COUNT(*) as cnt FROM experiences WHERE task_type != '' GROUP BY task_type ORDER BY cnt DESC"
-        ).fetchall()
+        task_types = self.sqlite.get_task_type_counts()
 
         low_coverage = []
-        for row in rows:
-            task_type = row[0]
-            count = row[1]
-            # Check if any wisdom mentions this task type
-            wis_count = self.sqlite.conn.execute(
-                "SELECT COUNT(*) FROM wisdom WHERE statement LIKE ? OR applicability_conditions LIKE ?",
-                (f"%{task_type}%", f"%{task_type}%"),
-            ).fetchone()[0]
+        for entry in task_types:
+            task_type = entry["task_type"]
+            count = entry["count"]
+            wis_count = self.sqlite.count_wisdom_mentioning(task_type)
 
             if wis_count == 0 and count >= 2:
                 low_coverage.append({

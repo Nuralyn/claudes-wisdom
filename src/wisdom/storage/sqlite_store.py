@@ -738,6 +738,26 @@ class SQLiteStore:
                     domains.add(d)
         return sorted(domains)
 
+    # ── Gap Analysis Queries ────────────────────────────────────────────
+
+    def get_task_type_counts(self) -> list[dict]:
+        """Return task types with their frequency counts, descending."""
+        rows = self.conn.execute(
+            "SELECT task_type, COUNT(*) as cnt "
+            "FROM experiences WHERE task_type != '' "
+            "GROUP BY task_type ORDER BY cnt DESC"
+        ).fetchall()
+        return [{"task_type": r[0], "count": r[1]} for r in rows]
+
+    def count_wisdom_mentioning(self, text: str) -> int:
+        """Count wisdom entries whose statement or applicability_conditions mention text."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM wisdom "
+            "WHERE statement LIKE ? OR applicability_conditions LIKE ?",
+            (f"%{text}%", f"%{text}%"),
+        ).fetchone()
+        return row[0]
+
     # ── Meta-Learning Aggregates ─────────────────────────────────────────
 
     def count_wisdom_by_type_and_lifecycle(self) -> list[dict]:

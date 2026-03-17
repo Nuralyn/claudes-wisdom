@@ -195,12 +195,17 @@ def audit(since: str = typer.Option("7d", "--since", help="Time period: 1d, 7d, 
     """Show recent system events (confidence changes, lifecycle transitions)."""
     system = _get_system()
     try:
-        # Parse since
-        if since.endswith("d"):
-            days = int(since[:-1])
-        elif since.endswith("h"):
-            days = int(since[:-1]) / 24
-        else:
+        # Parse since (e.g. "7d", "24h", "30d")
+        days = 7  # default
+        try:
+            if since.endswith("d"):
+                days = int(since[:-1])
+            elif since.endswith("h"):
+                days = int(since[:-1]) / 24
+            else:
+                days = int(since)
+        except (ValueError, IndexError):
+            console.print(f"[yellow]Invalid --since value '{since}', using 7d[/]")
             days = 7
         since_dt = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
