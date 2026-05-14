@@ -1,4 +1,4 @@
-# Wisdom System
+# Claude's Wisdom
 
 **A knowledge system that doesn't trust itself.**
 
