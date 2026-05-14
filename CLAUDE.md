@@ -14,7 +14,7 @@ pip install -e ".[mcp]"       # MCP server support
 pip install -e ".[all]"       # Everything including LLM providers
 
 wisdom --help                 # CLI
-python -m pytest tests/ -v    # Tests (188 tests, all must pass)
+python -m pytest tests/ -v    # Tests (241 tests, all must pass)
 python -m wisdom.mcp_server   # MCP server (stdio)
 
 WISDOM_DATA_DIR=/path/to/data wisdom init --seed all   # Bootstrap
@@ -43,7 +43,7 @@ WisdomSystem (composition root: src/wisdom/__init__.py)
   |     TriggerEngine, GapAnalysisEngine
   |
   +-- Meta-learning:
-  |     MetaLearningEngine -- analyzes failure patterns, computes risk scores
+  |     MetaLearningEngine -- failure patterns, risk scores, learning velocity, confidence volatility
   |
   +-- LLM: ProviderRegistry (Anthropic, OpenAI, Ollama — all optional)
 ```
@@ -69,7 +69,7 @@ Confidence decay over time is applied at retrieval time, not by mutating stored 
 `ConfidenceScore.overall` is a `@computed_field` derived from three sub-dimensions: `empirical` (0.4 weight — field evidence from applications), `theoretical` (0.3 — logical/structural validation), `observational` (0.3 — weak signals). Never set `overall` directly — it is read-only. Use `confidence.apply_delta(dimension, delta)` to change confidence, which scales the sub-dimension change so the effective overall change approximates the requested delta. This ensures confidence provenance is always traceable: you can see WHERE confidence comes from.
 
 ### The system learns from its own mistakes
-`engine/meta_learning.py:MetaLearningEngine` analyzes contamination logs, confidence history, and deprecation patterns to compute failure profiles and risk scores. It feeds risk-adjusted threshold hints to the adversarial engine, closing the meta-learning loop. All analysis is computed on-demand from existing tables — no new tables, no stored computed values.
+`engine/meta_learning.py:MetaLearningEngine` analyzes contamination logs, confidence history, and deprecation patterns to compute failure profiles and risk scores. It feeds risk-adjusted threshold hints to the adversarial engine, closing the meta-learning loop. It also computes learning velocity (how fast categories of wisdom mature) and confidence volatility (which entries have erratic histories). Volatility feeds directly into risk scoring — entries the system can't make up its mind about get scrutinized harder. All analysis is computed on-demand from existing tables — no new tables, no stored computed values.
 
 ### Constructor signatures encode the dependency graph
 - `WisdomEngine(sqlite, vector, lifecycle)` — needs lifecycle
@@ -80,7 +80,7 @@ Confidence decay over time is applied at retrieval time, not by mutating stored 
 - `ValidationEngine(sqlite)` — storage only
 - `AdversarialEngine(sqlite, vector)` — needs vector for semantic search
 - `PropagationEngine(sqlite, vector, config)` — needs everything
-- `CoverageEngine(sqlite, vector)` — needs vector for concept extraction
+- `CoverageEngine(sqlite, vector)` — needs vector for semantic gap detection
 - `MetaLearningEngine(sqlite, config)` — no vector needed (structured data analysis only)
 
 If you add a dependency, add it to the constructor. If you need config, take config. Do not reach through `self.sqlite` to get something that should be injected.
@@ -100,6 +100,11 @@ If you add a dependency, add it to the constructor. If you need config, take con
 | Meta-learning closes the loop | Failure patterns feed back into adversarial challenge thresholds. The system learns which types/methods/domains fail most. |
 | Relationship cascade is directional | If A SUPPORTS B and A fails, B loses backing. If A CONFLICTS with B and A fails, B is vindicated (no penalty). Penalty magnitudes (0.01–0.05) are lighter than provenance penalties (up to 0.1) because relationships are softer signals than shared knowledge. |
 | Content-hash dedup for import | SHA-256 of (statement + reasoning) enables cross-system dedup when IDs differ. Hashes are computed at import time, not stored — consistent with compute-at-read-time principle. |
+| Relationships table is sole source of truth | The `relationships` column in the `wisdom` table is kept for schema compat but always `[]`. All relationship data flows through the `relationships` table. This eliminates a denormalization bug where the model field was never read but always serialized. |
+| Coverage uses bigrams + suffix normalization | `_extract_concepts()` normalizes morphological variants (indexing/indexed/index) and extracts bigrams (connection_pooling). No external NLP dependencies — conservative suffix stripping only. Shared between coverage AND adversarial engines. |
+| Coverage has two tiers | Token-level (`find_domain_blind_spots`) catches word-frequency gaps. Embedding-level (`find_semantic_gaps`) catches semantic gaps that words miss (e.g., "memoization" vs "caching"). Both run through the MCP `analyze_coverage` tool. |
+| Volatility feeds into risk scoring | `compute_risk_score()` includes a volatility factor: entries with erratic confidence histories (many direction reversals, large swings) get higher risk scores, which feeds into tighter adversarial challenge thresholds. |
+| Maintenance includes meta-learning analysis | When wisdom is deprecated during maintenance, `compute_risk_score()` runs on each deprecated entry. This closes the loop: the system learns WHY entries fail, not just THAT they fail. |
 
 ## File layout
 
@@ -128,7 +133,7 @@ src/wisdom/
     validation.py      # External verification framework
     adversarial.py     # Devil's advocate challenge battery
     propagation.py     # Failure cascade through provenance graph + relationship graph
-    coverage.py        # Semantic absence detection
+    coverage.py        # Semantic absence detection (bigrams, suffix normalization)
     triggers.py        # Auto-trigger rules for pipeline automation
     gap_analysis.py    # Quantity-based gap detection
     meta_learning.py   # Failure pattern analysis, risk scores, meta-learning loop
@@ -149,7 +154,7 @@ src/wisdom/
     analytics_cmds.py  # analytics summary|domains|confidence|health|gaps|audit|coverage
     io_cmds.py         # io export|import|claude-md
   mcp_server/
-    server.py          # FastMCP server (15 tools, 3 resources)
+    server.py          # FastMCP server (17 tools, 3 resources)
     __main__.py        # python -m wisdom.mcp_server
   seeds/               # Bundled starter wisdom (YAML)
 tests/
@@ -159,10 +164,10 @@ tests/
   test_engines.py      # Experience, knowledge, wisdom, evolution, triggers, gaps
   test_retrieval.py    # Multi-factor scoring, temporal decay, validation discount
   test_evolution.py    # Asymmetric confidence, feedback loop, lifecycle transitions
-  test_trust.py        # Validation, adversarial, propagation, coverage (30 tests)
-  test_meta_learning.py # Meta-learning engine (26 tests)
+  test_trust.py        # Validation, adversarial, propagation, coverage, concept extraction (61 tests)
+  test_meta_learning.py # Meta-learning engine (42 tests)
   test_cli.py          # CLI commands via CliRunner
-  test_mcp.py          # MCP tool logic (without protocol overhead)
+  test_mcp.py          # MCP tool logic incl. meta-learning integration (15 tests)
 ```
 
 ## SQLite schema (v2)
@@ -172,9 +177,9 @@ tests/
 ## Testing
 
 ```bash
-python -m pytest tests/ -v                    # All 188 tests
-python -m pytest tests/test_trust.py -v       # Trust layer (39 tests)
-python -m pytest tests/test_meta_learning.py -v  # Meta-learning (26 tests)
+python -m pytest tests/ -v                    # All 241 tests
+python -m pytest tests/test_trust.py -v       # Trust layer (61 tests)
+python -m pytest tests/test_meta_learning.py -v  # Meta-learning (42 tests)
 python -m pytest tests/test_retrieval.py -v   # Retrieval + composition (17 tests)
 python -m pytest tests/ -k "lifecycle"        # Specific tests
 ```

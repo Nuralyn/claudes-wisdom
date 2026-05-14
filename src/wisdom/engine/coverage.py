@@ -9,6 +9,7 @@ It's suspicious. Absence is signal.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 
 from wisdom.logging_config import get_logger
@@ -30,11 +31,69 @@ STOPWORDS = frozenset({
     "your", "they", "it's", "can't", "don't", "it'll", "i've",
 })
 
+_TOKEN_RE = re.compile(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*")
+
+
+def _normalize(word: str) -> str:
+    """Lightweight suffix normalization for concept matching.
+
+    Groups morphological variants so 'indexing', 'indexed', and 'indexes'
+    all resolve to 'index'. Conservative — prefers under-stemming to
+    mangling. No external dependencies.
+    """
+    if word.endswith("ies") and len(word) > 5:
+        return word[:-3] + "y"  # queries → query, strategies → strategy
+    if word.endswith("ing") and len(word) > 5:
+        stem = word[:-3]
+        # Doubled consonant before -ing: running → run, not runn
+        if len(stem) > 2 and stem[-1] == stem[-2] and stem[-1] not in "aeious":
+            return stem[:-1]
+        return stem  # indexing → index
+    if word.endswith("ed") and len(word) > 5:
+        stem = word[:-2]
+        # Doubled consonant before -ed: stopped → stop
+        if len(stem) > 2 and stem[-1] == stem[-2] and stem[-1] not in "aeious":
+            return stem[:-1]
+        return stem  # indexed → index
+    if word.endswith("s") and len(word) > 4:
+        if word.endswith("ss") or word.endswith("us"):
+            return word  # access, status — not plurals
+        return word[:-1]  # connections → connection
+    return word
+
 
 def _extract_concepts(text: str, min_length: int = 4) -> set[str]:
-    """Extract meaningful concept words from text."""
-    words = text.lower().split()
-    return {w for w in words if len(w) >= min_length and w not in STOPWORDS}
+    """Extract meaningful concepts from text — unigrams and bigrams.
+
+    Returns normalized unigrams (suffix-stripped) plus bigrams for
+    multi-word concepts like 'connection_pooling' or 'race_condition'.
+    Both sides of a comparison must go through this function for
+    matching to work correctly.
+    """
+    tokens = _TOKEN_RE.findall(text.lower())
+
+    # Build list of (normalized_token, is_valid) for bigram adjacency tracking
+    normalized: list[str | None] = []
+    concepts: set[str] = set()
+
+    for tok in tokens:
+        if len(tok) >= min_length and tok not in STOPWORDS:
+            norm = _normalize(tok)
+            if len(norm) >= min_length:
+                concepts.add(norm)
+                normalized.append(norm)
+            else:
+                normalized.append(None)
+        else:
+            normalized.append(None)
+
+    # Bigrams: adjacent meaningful words form compound concepts
+    for i in range(len(normalized) - 1):
+        a, b = normalized[i], normalized[i + 1]
+        if a is not None and b is not None and a != b:
+            concepts.add(f"{a}_{b}")
+
+    return concepts
 
 
 class CoverageEngine:
@@ -205,6 +264,58 @@ class CoverageEngine:
             "blind_spots": blind_spots[:20],
             "wisdom_concepts_count": len(all_wisdom_concepts),
             "experience_concepts_count": len(frequent),
+        }
+
+    def find_semantic_gaps(
+        self, domain: str, similarity_threshold: float = 0.5
+    ) -> dict:
+        """Find experiences semantically distant from all wisdom entries.
+
+        Uses vector similarity (embeddings) to catch gaps that word-level
+        analysis misses — e.g., experiences about 'memoization' when wisdom
+        only covers 'caching'.
+
+        An experience is 'uncovered' when its best semantic match to any
+        wisdom entry falls below the similarity threshold.
+        """
+        experiences = self.sqlite.list_experiences(domain=domain, limit=200)
+        if len(experiences) < 3:
+            return {
+                "domain": domain,
+                "status": "insufficient_data",
+                "experience_count": len(experiences),
+            }
+
+        if self.vector.count("wisdom") == 0:
+            return {
+                "domain": domain,
+                "status": "no_wisdom_embeddings",
+                "experience_count": len(experiences),
+            }
+
+        uncovered = []
+        for exp in experiences:
+            text = f"{exp.description} {exp.input_text}"
+            results = self.vector.search(layer="wisdom", query=text, top_k=1)
+            best_sim = results[0]["similarity"] if results else 0.0
+            if best_sim < similarity_threshold:
+                uncovered.append({
+                    "experience_id": exp.id,
+                    "description": exp.description[:80],
+                    "best_wisdom_similarity": round(best_sim, 3),
+                })
+
+        uncovered.sort(key=lambda x: x["best_wisdom_similarity"])
+
+        return {
+            "domain": domain,
+            "status": "analyzed",
+            "experience_count": len(experiences),
+            "uncovered_count": len(uncovered),
+            "uncovered_ratio": round(
+                len(uncovered) / len(experiences), 3
+            ) if experiences else 0,
+            "most_distant": uncovered[:15],
         }
 
     def find_suspicious_wisdom(self, domain: str | None = None) -> list[dict]:

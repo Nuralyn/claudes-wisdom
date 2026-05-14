@@ -11,7 +11,6 @@ from wisdom.models.common import (
     ConfidenceScore,
     CreationMethod,
     LifecycleState,
-    Relationship,
     TradeOff,
     WisdomType,
 )
@@ -36,7 +35,6 @@ class Wisdom(BaseModel):
     lifecycle: LifecycleState = LifecycleState.EMERGING
     version: int = 1
     source_knowledge_ids: list[str] = Field(default_factory=list)
-    relationships: list[Relationship] = Field(default_factory=list)
     application_count: int = 0
     success_count: int = 0
     failure_count: int = 0

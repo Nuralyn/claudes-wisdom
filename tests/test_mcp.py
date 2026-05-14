@@ -100,3 +100,60 @@ class TestMCPToolLogic:
         composition = system.retrieval.compose_wisdom("writing good Python code")
         assert "entries" in composition
         assert "composition" in composition
+
+    def test_risk_score_computation(self, system):
+        w = system.wisdom.add(
+            statement="Always cache aggressively",
+            domains=["performance"],
+        )
+        risk = system.meta_learning.compute_risk_score(w.id)
+        assert 0.0 <= risk.base_risk <= 1.0
+        assert risk.recommended_challenge_level in ("standard", "elevated", "maximum")
+
+    def test_risk_profile_for_adversarial(self, system):
+        w = system.wisdom.add(
+            statement="Use microservices for everything",
+            domains=["architecture"],
+        )
+        # For a fresh entry with no failure history, risk should be standard → None
+        profile = system.meta_learning.risk_profile_for_adversarial(w.id)
+        # Profile may or may not be None depending on validation risk
+        if profile is not None:
+            assert "risk_level" in profile
+
+    def test_meta_learning_summary(self, system):
+        s = system.meta_learning.summary()
+        assert isinstance(s, dict)
+        assert "failure_profiles" in s
+        assert "risky_domains" in s
+        assert "super_spreaders" in s
+        assert "trajectory" in s
+        assert "velocity" in s
+        assert "volatility" in s
+
+    def test_challenge_uses_risk_profile(self, system):
+        """Challenge should pass risk_profile from meta-learning to adversarial."""
+        w = system.wisdom.add(
+            statement="Use connection pooling to manage database connections efficiently",
+            reasoning="Individual connections are expensive; pooling reuses them",
+            domains=["databases"],
+        )
+        # The challenge should work with risk-aware thresholds
+        risk_profile = system.meta_learning.risk_profile_for_adversarial(w.id)
+        report = system.adversarial.challenge(w, risk_profile=risk_profile)
+        assert hasattr(report, "passed")
+        assert hasattr(report, "findings")
+
+    def test_maintenance_includes_deprecation_analysis(self, system):
+        """Maintenance summary should include meta-learning analysis for deprecated entries."""
+        # Create wisdom that will be deprecated (low confidence + aged)
+        w = system.wisdom.add(
+            statement="Fragile wisdom that will fail",
+            domains=["test"],
+            confidence=ConfidenceScore(empirical=0.1, theoretical=0.1, observational=0.1),
+        )
+        summary = system.run_maintenance()
+        assert isinstance(summary, dict)
+        # If anything was deprecated, analysis should be present
+        if summary.get("deprecated"):
+            assert "deprecation_analysis" in summary

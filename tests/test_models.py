@@ -1,5 +1,7 @@
 """Tests for data models."""
 
+import pytest
+
 from wisdom.models.common import (
     ConfidenceScore,
     ExperienceResult,
@@ -57,6 +59,18 @@ class TestConfidenceScore:
         cs.apply_delta("empirical", 0.05)
         # Overall should have changed by approximately 0.05
         assert abs((cs.overall - old_overall) - 0.05) < 0.01
+
+    def test_apply_delta_rejects_invalid_dimension(self):
+        """apply_delta raises ValueError for unknown dimension names."""
+        cs = ConfidenceScore()
+        with pytest.raises(ValueError, match="Invalid confidence dimension"):
+            cs.apply_delta("nonexistent", 0.05)
+
+    def test_apply_delta_rejects_overall_dimension(self):
+        """Cannot apply_delta to 'overall' — it is computed, not a sub-dimension."""
+        cs = ConfidenceScore()
+        with pytest.raises(ValueError, match="Invalid confidence dimension"):
+            cs.apply_delta("overall", 0.1)
 
 
 class TestTradeOff:

@@ -16,12 +16,23 @@ No stored computed values. This follows the system's principle:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from wisdom.config import WisdomConfig
 from wisdom.logging_config import get_logger
 from wisdom.storage.sqlite_store import SQLiteStore
 
 logger = get_logger("engine.meta_learning")
+
+
+def _parse_timestamp(ts: str) -> datetime:
+    """Parse an ISO-ish timestamp from SQLite into a datetime."""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+        try:
+            return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return datetime.now(timezone.utc)
 
 
 # ── Data structures (output-only, matching ChallengeReport pattern) ───
@@ -57,6 +68,31 @@ class ContaminationPattern:
     total_affected: int
     avg_penalty: float
     affected_types: dict = field(default_factory=dict)  # {"wisdom": N, "knowledge": N, ...}
+
+
+@dataclass
+class VelocityProfile:
+    """How quickly a category of wisdom matures (gains confidence over time)."""
+
+    category: str  # e.g. "type:heuristic", "domain:databases"
+    entry_count: int
+    avg_velocity: float  # avg confidence delta per day (positive = maturing)
+    avg_events_per_day: float  # how actively confidence changes
+    fastest_id: str | None = None
+    slowest_id: str | None = None
+
+
+@dataclass
+class VolatilityEntry:
+    """A single wisdom entry with erratic confidence history."""
+
+    wisdom_id: str
+    statement_preview: str
+    total_events: int
+    direction_changes: int
+    avg_delta_magnitude: float
+    max_swing: float
+    volatility_score: float  # 0.0 (stable) to 1.0 (erratic)
 
 
 class MetaLearningEngine:
@@ -195,7 +231,8 @@ class MetaLearningEngine:
         2. Method risk: failure rate for this creation_method
         3. Domain risk: contamination density in its domains
         4. Validation risk: unvalidated entries historically fail more
-        5. Age risk: very young wisdom has higher risk (insufficient testing)
+        5. Application risk: untested wisdom has higher risk
+        6. Volatility risk: erratic confidence history signals instability
         """
         w = self.sqlite.get_wisdom(wisdom_id)
         if not w:
@@ -280,13 +317,22 @@ class MetaLearningEngine:
             "reason": f"{w.application_count} applications",
         })
 
+        # Factor 6: Volatility risk (erratic confidence = unreliable)
+        volatility_risk = self._compute_volatility_risk(wisdom_id)
+        risk_factors.append({
+            "name": "volatility_risk",
+            "value": volatility_risk,
+            "reason": f"Confidence volatility: {volatility_risk:.2f}",
+        })
+
         # Weighted combination
         weights = {
-            "type_risk": 0.25,
-            "method_risk": 0.20,
-            "domain_risk": 0.20,
+            "type_risk": 0.20,
+            "method_risk": 0.15,
+            "domain_risk": 0.15,
             "validation_risk": 0.20,
             "application_risk": 0.15,
+            "volatility_risk": 0.15,
         }
         base_risk = sum(
             weights.get(f["name"], 0.0) * f["value"]
@@ -308,6 +354,27 @@ class MetaLearningEngine:
             risk_factors=risk_factors,
             recommended_challenge_level=level,
         )
+
+    def _compute_volatility_risk(self, wisdom_id: str) -> float:
+        """Compute volatility risk for a single wisdom entry.
+
+        Returns 0.0 (stable) to 1.0 (highly erratic). Entries with
+        fewer than 2 confidence events get 0.0 (no evidence of instability).
+        """
+        history = self.sqlite.get_confidence_history("wisdom", wisdom_id)
+        if len(history) < 2:
+            return 0.0
+
+        deltas = [e["new_confidence"] - e["old_confidence"] for e in history]
+        direction_changes = sum(
+            1 for i in range(1, len(deltas))
+            if deltas[i] * deltas[i - 1] < 0
+        )
+        reversal_rate = direction_changes / (len(deltas) - 1)
+        avg_magnitude = sum(abs(d) for d in deltas) / len(deltas)
+        magnitude_factor = min(1.0, avg_magnitude / 0.1)
+
+        return 0.6 * reversal_rate + 0.4 * magnitude_factor
 
     def contamination_patterns(self, limit: int = 10) -> list[ContaminationPattern]:
         """Find the worst 'super-spreader' contamination events.
@@ -361,6 +428,136 @@ class MetaLearningEngine:
             "top_decrease_reasons": decrease_reasons,
         }
 
+    def learning_velocity(self) -> list[VelocityProfile]:
+        """Compute how quickly different categories of wisdom mature.
+
+        Groups by type and domain, computing average confidence velocity
+        (delta per day) and activity rate (events per day). Categories with
+        no confidence events are excluded.
+
+        A positive velocity means entries in that category tend to gain
+        confidence over time. Negative means they tend to decline.
+        """
+        histories = self.sqlite.get_wisdom_confidence_histories()
+        creation_dates = self.sqlite.get_wisdom_creation_dates()
+
+        if not histories:
+            return []
+
+        # Compute per-entry velocity
+        entry_velocities: dict[str, dict] = {}  # wisdom_id -> {velocity, events_per_day}
+        for wid, events in histories.items():
+            created_str = creation_dates.get(wid)
+            if not created_str or len(events) < 1:
+                continue
+
+            created = _parse_timestamp(created_str)
+            last_ts = _parse_timestamp(events[-1]["timestamp"])
+            span_days = max((last_ts - created).total_seconds() / 86400, 0.01)
+
+            net_delta = events[-1]["new_confidence"] - events[0]["old_confidence"]
+            entry_velocities[wid] = {
+                "velocity": net_delta / span_days,
+                "events_per_day": len(events) / span_days,
+            }
+
+        if not entry_velocities:
+            return []
+
+        # Group by type and domain
+        all_wisdom_entries = {
+            wid: self.sqlite.get_wisdom(wid) for wid in entry_velocities
+        }
+
+        category_entries: dict[str, list[str]] = {}
+        for wid, w in all_wisdom_entries.items():
+            if not w:
+                continue
+            type_key = f"type:{w.type.value}"
+            category_entries.setdefault(type_key, []).append(wid)
+            for d in w.applicable_domains:
+                domain_key = f"domain:{d}"
+                category_entries.setdefault(domain_key, []).append(wid)
+
+        profiles: list[VelocityProfile] = []
+        for cat, wids in category_entries.items():
+            velocities = [entry_velocities[wid] for wid in wids if wid in entry_velocities]
+            if not velocities:
+                continue
+
+            avg_vel = sum(v["velocity"] for v in velocities) / len(velocities)
+            avg_epd = sum(v["events_per_day"] for v in velocities) / len(velocities)
+
+            fastest = max(wids, key=lambda w: entry_velocities.get(w, {}).get("velocity", 0))
+            slowest = min(wids, key=lambda w: entry_velocities.get(w, {}).get("velocity", 0))
+
+            profiles.append(VelocityProfile(
+                category=cat,
+                entry_count=len(velocities),
+                avg_velocity=avg_vel,
+                avg_events_per_day=avg_epd,
+                fastest_id=fastest if fastest != slowest else None,
+                slowest_id=slowest if fastest != slowest else None,
+            ))
+
+        profiles.sort(key=lambda p: p.avg_velocity, reverse=True)
+        return profiles
+
+    def confidence_volatility(self, limit: int = 10) -> list[VolatilityEntry]:
+        """Find wisdom entries with the most erratic confidence histories.
+
+        Volatility measures instability: entries where confidence bounces
+        up and down rather than moving steadily in one direction. High
+        volatility means the system can't make up its mind — a sign the
+        wisdom is contextually ambiguous or sitting at the boundary of
+        correctness.
+
+        Returns top N entries sorted by volatility_score descending.
+        Entries with fewer than 2 confidence events are excluded.
+        """
+        histories = self.sqlite.get_wisdom_confidence_histories()
+        if not histories:
+            return []
+
+        entries: list[VolatilityEntry] = []
+        for wid, events in histories.items():
+            if len(events) < 2:
+                continue
+
+            deltas = [e["new_confidence"] - e["old_confidence"] for e in events]
+
+            # Direction changes: how many times the sign flips
+            direction_changes = 0
+            for i in range(1, len(deltas)):
+                if deltas[i] * deltas[i - 1] < 0:  # sign change
+                    direction_changes += 1
+
+            avg_magnitude = sum(abs(d) for d in deltas) / len(deltas)
+            max_swing = max(abs(d) for d in deltas)
+
+            # Volatility score: combines reversal frequency with magnitude
+            # Reversals normalized by opportunity (events - 1)
+            reversal_rate = direction_changes / (len(deltas) - 1) if len(deltas) > 1 else 0
+            # Scale magnitude to 0-1 (0.1 delta is significant for confidence)
+            magnitude_factor = min(1.0, avg_magnitude / 0.1)
+            volatility_score = 0.6 * reversal_rate + 0.4 * magnitude_factor
+
+            w = self.sqlite.get_wisdom(wid)
+            preview = w.statement[:60] if w else "(deleted)"
+
+            entries.append(VolatilityEntry(
+                wisdom_id=wid,
+                statement_preview=preview,
+                total_events=len(events),
+                direction_changes=direction_changes,
+                avg_delta_magnitude=avg_magnitude,
+                max_swing=max_swing,
+                volatility_score=volatility_score,
+            ))
+
+        entries.sort(key=lambda e: e.volatility_score, reverse=True)
+        return entries[:limit]
+
     def risk_profile_for_adversarial(self, wisdom_id: str) -> dict | None:
         """Build a risk profile dict suitable for passing to AdversarialEngine.challenge().
 
@@ -391,11 +588,15 @@ class MetaLearningEngine:
         - Top riskiest domains
         - Top super-spreaders
         - Overall confidence trajectory
+        - Learning velocity by category
+        - Most volatile entries
         """
         profiles = self.failure_profiles()
         domain_risks = self.domain_risk_assessment()
         patterns = self.contamination_patterns(limit=5)
         trajectory = self.confidence_trajectory()
+        velocity = self.learning_velocity()
+        volatility = self.confidence_volatility(limit=5)
 
         # Top risky profiles (failure_rate > 0)
         risky_profiles = [p for p in profiles if p.failure_rate > 0][:5]
@@ -408,6 +609,8 @@ class MetaLearningEngine:
             "risky_domains": risky_domains,
             "super_spreaders": patterns,
             "trajectory": trajectory,
+            "velocity": velocity,
+            "volatility": volatility,
             "total_profiles_analyzed": len(profiles),
             "total_domains_analyzed": len(domain_risks),
         }

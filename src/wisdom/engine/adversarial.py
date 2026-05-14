@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 
+from wisdom.engine.coverage import _extract_concepts
 from wisdom.logging_config import get_logger
 from wisdom.models.common import LifecycleState
 from wisdom.models.wisdom import Wisdom
@@ -312,46 +313,38 @@ class AdversarialEngine:
 
         Search for experiences in the wisdom's domain, extract key concepts
         that appear frequently but are absent from the wisdom's text.
+
+        Uses the shared _extract_concepts from coverage.py for consistent
+        tokenization, suffix normalization, and bigram extraction.
         """
         findings = []
 
         if not w.applicable_domains:
             return findings  # Can't check blind spots without a domain
 
-        # Risk-adjusted frequency threshold: high-risk profiles are more suspicious
         frequency_threshold = 0.3
         if risk_profile and "blind_spot_frequency" in risk_profile:
             frequency_threshold = risk_profile["blind_spot_frequency"]
 
-        # Get all concepts from the wisdom's text
-        wisdom_text = f"{w.statement} {w.reasoning} {' '.join(w.implications)} {' '.join(w.applicability_conditions)}".lower()
-        wisdom_words = set(wisdom_text.split())
+        wisdom_concepts = _extract_concepts(
+            f"{w.statement} {w.reasoning} "
+            f"{' '.join(w.implications)} "
+            f"{' '.join(w.applicability_conditions)}"
+        )
 
-        # Search for experiences in the same domain
         for domain in w.applicable_domains:
             domain_exps = self.sqlite.list_experiences(domain=domain, limit=100)
             if len(domain_exps) < 5:
                 continue
 
-            # Count concepts that appear in experiences
-            stopwords = {
-                "the", "and", "for", "that", "this", "with", "from", "have", "been",
-                "was", "were", "are", "not", "but", "what", "when", "how", "which",
-                "their", "there", "them", "then", "than", "into", "also", "just",
-                "more", "some", "could", "would", "should", "about", "after", "before",
-                "only", "other", "very", "will", "each", "make", "like", "over",
-                "using", "used", "code", "does",
-            }
             exp_concepts: Counter[str] = Counter()
             for exp in domain_exps:
-                text = f"{exp.description} {exp.input_text}".lower()
-                tokens = [tok for tok in text.split() if len(tok) > 3 and tok not in stopwords]
-                exp_concepts.update(set(tokens))  # unique per experience
+                text = f"{exp.description} {exp.input_text}"
+                exp_concepts.update(_extract_concepts(text))
 
-            # Find concepts frequent in experiences but absent from wisdom
             missing = []
             for concept, count in exp_concepts.most_common(30):
-                if count >= len(domain_exps) * frequency_threshold and concept not in wisdom_words:
+                if count >= len(domain_exps) * frequency_threshold and concept not in wisdom_concepts:
                     missing.append((concept, count))
 
             if missing:
@@ -391,12 +384,7 @@ class AdversarialEngine:
 
         # Check if applications are all in the same narrow context
         if w.application_count > 0:
-            app_exps = self.sqlite.list_experiences(limit=1000)
-            app_exps = [
-                e for e in app_exps
-                if e.type.value == "wisdom_application"
-                and e.metadata.get("applied_wisdom_id") == w.id
-            ]
+            app_exps = self.sqlite.list_experiences_for_wisdom(w.id)
             if app_exps:
                 domains_tested = set(e.domain for e in app_exps if e.domain)
                 if len(domains_tested) <= 1 and len(w.applicable_domains) > 1:
@@ -415,25 +403,24 @@ class AdversarialEngine:
         """Heuristic check for whether two statements might conflict.
 
         Looks for negation patterns and opposing sentiment markers.
+        Uses normalized concept extraction for subject-matter overlap
+        so morphological variants (indexing/indexed) count as matches.
         This is a rough heuristic — LLM-powered analysis would be better.
         """
         s1_lower, s2_lower = s1.lower(), s2.lower()
 
-        # Check for direct negation patterns
         negation_words = {"not", "never", "avoid", "don't", "doesn't", "shouldn't", "without"}
         s1_negated = any(w in s1_lower.split() for w in negation_words)
         s2_negated = any(w in s2_lower.split() for w in negation_words)
 
-        # If one negates and the other doesn't, they might conflict
-        if s1_negated != s2_negated:
-            # Check if they share enough subject matter
-            s1_words = set(s1_lower.split()) - negation_words
-            s2_words = set(s2_lower.split()) - negation_words
-            overlap = len(s1_words & s2_words)
-            if overlap >= 3:
-                return True
+        # Normalized concept overlap (morphological variants match)
+        s1_concepts = _extract_concepts(s1)
+        s2_concepts = _extract_concepts(s2)
+        concept_overlap = len(s1_concepts & s2_concepts)
 
-        # Check for opposing recommendations
+        if s1_negated != s2_negated and concept_overlap >= 2:
+            return True
+
         prefer_words = {"prefer", "always", "best", "should", "must", "use"}
         avoid_words = {"avoid", "never", "worst", "shouldn't", "don't", "skip"}
         s1_prefers = any(w in s1_lower.split() for w in prefer_words)
@@ -442,9 +429,7 @@ class AdversarialEngine:
         s2_prefers = any(w in s2_lower.split() for w in prefer_words)
 
         if (s1_prefers and s2_avoids) or (s1_avoids and s2_prefers):
-            s1_words = set(s1_lower.split())
-            s2_words = set(s2_lower.split())
-            if len(s1_words & s2_words) >= 3:
+            if concept_overlap >= 2:
                 return True
 
         return False

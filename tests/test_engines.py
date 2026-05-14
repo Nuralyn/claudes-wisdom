@@ -186,6 +186,37 @@ class TestWisdomEngine:
         assert result.lifecycle == LifecycleState.ESTABLISHED
 
 
+    def test_add_dedup_blocks_identical(self, wis_engine):
+        """Adding wisdom with identical statement+reasoning returns existing entry."""
+        w1 = wis_engine.add(
+            statement="Dedup test principle",
+            reasoning="Exact same reasoning",
+            domains=["testing"],
+        )
+        w2 = wis_engine.add(
+            statement="Dedup test principle",
+            reasoning="Exact same reasoning",
+            domains=["testing"],
+        )
+        assert w1.id == w2.id
+        assert wis_engine.count() == 1  # only one entry in storage
+
+    def test_add_dedup_allows_different_reasoning(self, wis_engine):
+        """Same statement but different reasoning is NOT a duplicate (e.g. transfer)."""
+        w1 = wis_engine.add(
+            statement="Transferable principle",
+            reasoning="Original reasoning",
+            domains=["python"],
+        )
+        w2 = wis_engine.add(
+            statement="Transferable principle",
+            reasoning="Original reasoning [Transferred from python]",
+            domains=["rust"],
+        )
+        assert w1.id != w2.id
+        assert wis_engine.count() == 2
+
+
 class TestEvolutionEngine:
     def test_reinforce_positive(self, evo_engine, wis_engine):
         w = wis_engine.add(statement="Test principle", domains=["test"])

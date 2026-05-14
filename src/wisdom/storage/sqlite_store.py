@@ -298,6 +298,20 @@ class SQLiteStore:
             ).fetchall()
         return [self._row_to_experience(r) for r in rows]
 
+    def list_experiences_for_wisdom(self, wisdom_id: str) -> list[Experience]:
+        """Find wisdom_application experiences linked to a specific wisdom ID.
+
+        Uses json_extract on the metadata column to avoid loading all
+        experiences into memory just to filter by applied_wisdom_id.
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM experiences "
+            "WHERE type = 'wisdom_application' "
+            "AND json_extract(metadata, '$.applied_wisdom_id') = ?",
+            (wisdom_id,),
+        ).fetchall()
+        return [self._row_to_experience(r) for r in rows]
+
     def _row_to_experience(self, row: sqlite3.Row) -> Experience:
         return Experience(
             id=row["id"],
@@ -448,7 +462,7 @@ class SQLiteStore:
                 w.confidence.model_dump_json(),
                 w.lifecycle.value, w.version,
                 json.dumps(w.source_knowledge_ids),
-                json.dumps([r.model_dump() for r in w.relationships]),
+                "[]",  # relationships column kept for schema compat; table is source of truth
                 w.application_count, w.success_count, w.failure_count,
                 w.deprecation_reason, w.creation_method.value,
                 json.dumps(w.tags), json.dumps(w.metadata),
@@ -490,6 +504,13 @@ class SQLiteStore:
         self.conn.commit()
         return cursor.rowcount > 0
 
+    def find_wisdom_by_statement(self, statement: str) -> list[Wisdom]:
+        """Find wisdom entries with an exact statement match (for dedup)."""
+        rows = self.conn.execute(
+            "SELECT * FROM wisdom WHERE statement = ?", (statement,)
+        ).fetchall()
+        return [self._row_to_wisdom(r) for r in rows]
+
     def count_wisdom(self, domain: str | None = None) -> int:
         if domain:
             row = self.conn.execute(
@@ -505,7 +526,6 @@ class SQLiteStore:
 
         conf_data = json.loads(row["confidence"])
         trade_offs_data = json.loads(row["trade_offs"])
-        relationships_data = json.loads(row["relationships"])
         return Wisdom(
             id=row["id"],
             created_at=row["created_at"],
@@ -523,7 +543,6 @@ class SQLiteStore:
             lifecycle=row["lifecycle"],
             version=row["version"],
             source_knowledge_ids=json.loads(row["source_knowledge_ids"]),
-            relationships=[Relationship(**r) for r in relationships_data],
             application_count=row["application_count"],
             success_count=row["success_count"],
             failure_count=row["failure_count"],
@@ -562,6 +581,13 @@ class SQLiteStore:
                 "SELECT * FROM relationships WHERE source_id = ? OR target_id = ?",
                 (entity_id, entity_id),
             ).fetchall()
+        return [self._row_to_relationship(r) for r in rows]
+
+    def list_relationships(self, limit: int = 100000) -> list[Relationship]:
+        rows = self.conn.execute(
+            "SELECT * FROM relationships ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
         return [self._row_to_relationship(r) for r in rows]
 
     def find_conflicts(self, entity_id: str) -> list[Relationship]:
@@ -844,6 +870,42 @@ class SQLiteStore:
             {"reason": r[0], "count": r[1], "avg_drop": r[2]}
             for r in rows
         ]
+
+    def get_wisdom_confidence_histories(self) -> dict[str, list[dict]]:
+        """Get confidence histories for all wisdom entries, grouped by entity_id.
+
+        Returns {wisdom_id: [{old_confidence, new_confidence, reason, timestamp}, ...]}
+        sorted chronologically (oldest first) within each group.
+        """
+        rows = self.conn.execute(
+            """SELECT entity_id, old_confidence, new_confidence, reason, timestamp
+            FROM confidence_log
+            WHERE entity_type = 'wisdom'
+            ORDER BY entity_id, id ASC"""
+        ).fetchall()
+
+        histories: dict[str, list[dict]] = {}
+        for r in rows:
+            eid = r[0]
+            if eid not in histories:
+                histories[eid] = []
+            histories[eid].append({
+                "old_confidence": r[1],
+                "new_confidence": r[2],
+                "reason": r[3],
+                "timestamp": r[4],
+            })
+        return histories
+
+    def get_wisdom_creation_dates(self) -> dict[str, str]:
+        """Get created_at timestamps for all wisdom entries.
+
+        Returns {wisdom_id: created_at_iso_string}.
+        """
+        rows = self.conn.execute(
+            "SELECT id, created_at FROM wisdom"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
 
     # ── Stats ──────────────────────────────────────────────────────────────
 

@@ -31,7 +31,7 @@ def _content_hash(entity) -> str:
     elif isinstance(entity, Experience):
         content = f"experience:{entity.description}:{entity.domain}"
     else:
-        content = f"unknown:{entity!r}"
+        raise ValueError(f"Cannot hash unknown entity type: {type(entity).__name__}")
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 io_app = typer.Typer(help="Import and export wisdom data")
@@ -64,6 +64,7 @@ def export_cmd(
         experiences = system.experiences.list(domain=domain, limit=100000)
         knowledge = system.knowledge.list(domain=domain, limit=100000)
         wisdom_entries = system.wisdom.list(domain=domain, limit=100000)
+        relationships = system.sqlite.list_relationships()
 
         # Filter by confidence if specified
         if min_confidence > 0:
@@ -87,6 +88,7 @@ def export_cmd(
             "experiences": [e.model_dump(mode="json") for e in experiences],
             "knowledge": [k.model_dump(mode="json") for k in knowledge],
             "wisdom": [w.model_dump(mode="json") for w in wisdom_entries],
+            "relationships": [r.model_dump(mode="json") for r in relationships],
             "metadata": {
                 "source_system": "wisdom-system-v0.1",
                 "total_entries": len(experiences) + len(knowledge) + len(wisdom_entries),
@@ -99,6 +101,8 @@ def export_cmd(
         console.print(f"  Experiences: {len(experiences)}")
         console.print(f"  Knowledge: {len(knowledge)}")
         console.print(f"  Wisdom: {len(wisdom_entries)}")
+        if relationships:
+            console.print(f"  Relationships: {len(relationships)}")
     finally:
         system.close()
 
@@ -116,7 +120,11 @@ def import_cmd(
             console.print(f"[red]File not found:[/] {input_file}")
             raise typer.Exit(1)
 
-        data = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            console.print(f"[red]Invalid JSON in {input_file}:[/] {e}")
+            raise typer.Exit(1)
         if data.get("version") != "1.0":
             console.print(f"[yellow]Warning: Unknown pack version {data.get('version')}[/]")
 
@@ -130,7 +138,8 @@ def import_cmd(
             for w in system.wisdom.list(limit=100000):
                 system.wisdom.delete(w.id)
 
-        # Import experiences, knowledge, wisdom with content-hash dedup
+        # Import experiences, knowledge, wisdom, relationships with content-hash dedup
+        from wisdom.models.common import Relationship
         from wisdom.models.experience import Experience
         from wisdom.models.knowledge import Knowledge
         from wisdom.models.wisdom import Wisdom
@@ -193,11 +202,30 @@ def import_cmd(
             existing_hashes.add(_content_hash(w))
             wis_count += 1
 
+        # Import relationships from the dedicated key (v1.0+ packs)
+        rel_count = 0
+        existing_rel_ids: set[str] = set()
+        if mode == "merge" and data.get("relationships"):
+            for r in system.sqlite.list_relationships():
+                existing_rel_ids.add(r.id)
+        for r_data in data.get("relationships", []):
+            try:
+                rel = Relationship(**r_data)
+            except Exception as e:
+                console.print(f"[yellow]Skipped invalid relationship:[/] {e}")
+                continue
+            if mode == "merge" and rel.id in existing_rel_ids:
+                continue
+            system.sqlite.save_relationship(rel)
+            rel_count += 1
+
         total_skipped = skipped["exp"] + skipped["know"] + skipped["wis"]
         console.print(f"[green]Import complete ({mode} mode):[/]")
         console.print(f"  Experiences: {exp_count}")
         console.print(f"  Knowledge: {know_count}")
         console.print(f"  Wisdom: {wis_count}")
+        if rel_count:
+            console.print(f"  Relationships: {rel_count}")
         if total_skipped > 0:
             console.print(f"  [dim]Skipped {total_skipped} duplicates (by ID or content hash)[/]")
     finally:

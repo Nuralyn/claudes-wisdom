@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "wisdom": {
+      "command": "python",
+      "args": ["-m", "wisdom.mcp_server"]
+    }
+  }
+}

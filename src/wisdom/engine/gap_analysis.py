@@ -29,8 +29,8 @@ class GapAnalysisEngine:
                 continue
 
             # Ratio of wisdom to experiences — low ratio = gap
-            wisdom_ratio = wis_count / exp_count if exp_count > 0 else 0
-            knowledge_ratio = know_count / exp_count if exp_count > 0 else 0
+            wisdom_ratio = wis_count / exp_count
+            knowledge_ratio = know_count / exp_count
 
             if wisdom_ratio < 0.1 and exp_count >= 3:
                 gaps.append({
@@ -137,11 +137,9 @@ class GapAnalysisEngine:
     def _suggest_action(self, exp_count: int, know_count: int, wis_count: int) -> str:
         if know_count == 0:
             return "Run knowledge extraction first"
-        if wis_count == 0 and know_count > 0:
+        if wis_count == 0:
             return "Run wisdom synthesis"
-        if wis_count > 0:
-            return "Consider adding more experiences or reinforcing existing wisdom"
-        return "Add more experiences"
+        return "Consider adding more experiences or reinforcing existing wisdom"
 
     def summary(self, domain: str | None = None) -> dict:
         """Get a complete gap analysis summary."""

@@ -85,6 +85,43 @@ class TestExperienceStorage:
         assert loaded.metadata == {"key": "val"}
 
 
+    def test_list_experiences_for_wisdom(self, store):
+        """list_experiences_for_wisdom returns only linked application experiences."""
+        wid = "wis_target_123"
+        # Create two application experiences linked to our wisdom
+        for i in range(2):
+            exp = Experience(
+                description=f"Applied wisdom {i}",
+                type=ExperienceType.WISDOM_APPLICATION,
+                metadata={"applied_wisdom_id": wid},
+            )
+            store.save_experience(exp)
+        # Create an unrelated experience
+        unrelated = Experience(
+            description="Unrelated task",
+            type=ExperienceType.TASK,
+        )
+        store.save_experience(unrelated)
+        # Create an application experience for a DIFFERENT wisdom
+        other = Experience(
+            description="Other application",
+            type=ExperienceType.WISDOM_APPLICATION,
+            metadata={"applied_wisdom_id": "wis_other_456"},
+        )
+        store.save_experience(other)
+
+        results = store.list_experiences_for_wisdom(wid)
+        assert len(results) == 2
+        assert all(
+            e.metadata.get("applied_wisdom_id") == wid for e in results
+        )
+
+    def test_list_experiences_for_wisdom_empty(self, store):
+        """Returns empty list when no experiences link to the given wisdom."""
+        results = store.list_experiences_for_wisdom("nonexistent_id")
+        assert results == []
+
+
 class TestKnowledgeStorage:
     def test_save_and_get(self, store):
         k = Knowledge(statement="Pattern A", domain="python")
@@ -211,6 +248,48 @@ class TestConfidenceLog:
         store.log_confidence_change("wisdom", "w1", 0.5, 0.6, "test", "")
         events = store.get_recent_events()
         assert len(events) == 1
+
+
+class TestBatchQueries:
+    """Tests for batch confidence history and creation date queries."""
+
+    def test_get_wisdom_confidence_histories(self, store):
+        w1 = Wisdom(statement="W1", applicable_domains=["test"])
+        w2 = Wisdom(statement="W2", applicable_domains=["test"])
+        store.save_wisdom(w1)
+        store.save_wisdom(w2)
+
+        store.log_confidence_change("wisdom", w1.id, 0.5, 0.6, "up")
+        store.log_confidence_change("wisdom", w1.id, 0.6, 0.55, "down")
+        store.log_confidence_change("wisdom", w2.id, 0.5, 0.7, "up")
+
+        histories = store.get_wisdom_confidence_histories()
+        assert w1.id in histories
+        assert w2.id in histories
+        assert len(histories[w1.id]) == 2
+        assert len(histories[w2.id]) == 1
+        # Chronological order within each group
+        assert histories[w1.id][0]["new_confidence"] == 0.6
+        assert histories[w1.id][1]["new_confidence"] == 0.55
+
+    def test_get_wisdom_confidence_histories_empty(self, store):
+        histories = store.get_wisdom_confidence_histories()
+        assert histories == {}
+
+    def test_get_wisdom_creation_dates(self, store):
+        w1 = Wisdom(statement="W1", applicable_domains=["test"])
+        w2 = Wisdom(statement="W2", applicable_domains=["test"])
+        store.save_wisdom(w1)
+        store.save_wisdom(w2)
+
+        dates = store.get_wisdom_creation_dates()
+        assert w1.id in dates
+        assert w2.id in dates
+        assert isinstance(dates[w1.id], str)
+
+    def test_get_wisdom_creation_dates_empty(self, store):
+        dates = store.get_wisdom_creation_dates()
+        assert dates == {}
 
 
 class TestStats:

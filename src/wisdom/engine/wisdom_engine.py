@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 
 from wisdom.engine.lifecycle import LifecycleManager
@@ -48,6 +49,15 @@ class WisdomEngine:
         source_knowledge_ids: list[str] | None = None,
     ) -> Wisdom:
         """Add a wisdom entry directly (human expert path or pipeline)."""
+        # Content-hash dedup: reject identical statement+reasoning
+        existing = self._find_duplicate(statement, reasoning)
+        if existing:
+            logger.info(
+                "Duplicate wisdom detected (matches %s), returning existing entry",
+                existing.id,
+            )
+            return existing
+
         w = Wisdom(
             type=wisdom_type,
             statement=statement,
@@ -77,6 +87,20 @@ class WisdomEngine:
         )
         logger.info("Added wisdom %s: %s", w.id, w.statement[:60])
         return w
+
+    @staticmethod
+    def _content_hash(statement: str, reasoning: str) -> str:
+        """SHA-256 content hash matching io_cmds._content_hash for wisdom."""
+        content = f"wisdom:{statement}:{reasoning}"
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+    def _find_duplicate(self, statement: str, reasoning: str) -> Wisdom | None:
+        """Check for existing wisdom with identical content (statement + reasoning)."""
+        target_hash = self._content_hash(statement, reasoning)
+        for candidate in self.sqlite.find_wisdom_by_statement(statement):
+            if self._content_hash(candidate.statement, candidate.reasoning) == target_hash:
+                return candidate
+        return None
 
     def synthesize_from_knowledge(
         self, knowledge_entries: list[Knowledge], domain: str = ""

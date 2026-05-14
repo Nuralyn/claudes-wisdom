@@ -217,12 +217,7 @@ class PropagationEngine:
             result.total_penalty_events += 1
 
         # 3. Mark application experiences as contaminated
-        all_exps = self.sqlite.list_experiences(limit=100000)
-        contaminated_exps = [
-            e for e in all_exps
-            if e.type.value == "wisdom_application"
-            and e.metadata.get("applied_wisdom_id") == wisdom_id
-        ]
+        contaminated_exps = self.sqlite.list_experiences_for_wisdom(wisdom_id)
         for exp in contaminated_exps:
             exp.metadata["contaminated"] = "true"
             exp.metadata["contamination_source"] = wisdom_id
@@ -334,7 +329,7 @@ class PropagationEngine:
                 })
 
         # Find application experiences
-        all_exps = self.sqlite.list_experiences(limit=100000)
+        linked_exps = self.sqlite.list_experiences_for_wisdom(wisdom_id)
         applications = [
             {
                 "id": e.id,
@@ -342,9 +337,7 @@ class PropagationEngine:
                 "domain": e.domain,
                 "contaminated": e.metadata.get("contaminated", "false") == "true",
             }
-            for e in all_exps
-            if e.type.value == "wisdom_application"
-            and e.metadata.get("applied_wisdom_id") == wisdom_id
+            for e in linked_exps
         ]
 
         # Find contamination history

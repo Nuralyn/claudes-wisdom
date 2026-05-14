@@ -369,6 +369,103 @@ class TestAdversarial:
         assert "findings" in d
         assert "summary" in d
 
+    def test_blind_spot_normalization(self, adversarial, wis_engine, exp_engine):
+        """Blind spot detection should normalize morphological variants.
+
+        If wisdom says 'index' and experiences say 'indexing', there should
+        be NO blind spot — normalization should match them.
+        """
+        for i in range(6):
+            exp_engine.add(
+                description=f"Optimized database indexing for query performance {i}",
+                domain="databases",
+            )
+
+        w = wis_engine.add(
+            statement="Design proper index structures for database query performance",
+            reasoning="Indexes accelerate lookups",
+            domains=["databases"],
+            applicability_conditions=["Read-heavy workloads"],
+        )
+
+        report = adversarial.challenge(w)
+        blind_spots = [f for f in report.findings if f.category == "blind_spot"]
+        # 'index' from wisdom and 'indexing' from experiences should match via normalization
+        blind_spot_text = " ".join(f.evidence for f in blind_spots)
+        assert "index" not in blind_spot_text.split("'"), (
+            f"Normalization should match 'index' to 'indexing'; got blind spots: {blind_spot_text}"
+        )
+
+    def test_blind_spot_detects_bigram_gaps(self, adversarial, wis_engine, exp_engine):
+        """Blind spot detection should catch missing bigram concepts."""
+        for i in range(8):
+            exp_engine.add(
+                description=f"Connection pooling caused resource exhaustion in service {i}",
+                domain="databases",
+                input_text="Pool size configuration and connection timeout settings",
+            )
+
+        w = wis_engine.add(
+            statement="Monitor database latency for production stability",
+            reasoning="Latency spikes indicate problems",
+            domains=["databases"],
+            applicability_conditions=["Production systems"],
+        )
+
+        report = adversarial.challenge(w)
+        blind_spots = [f for f in report.findings if f.category == "blind_spot"]
+        assert len(blind_spots) >= 1, "Should detect concepts missing from wisdom"
+        all_evidence = " ".join(f.evidence for f in blind_spots)
+        assert "connection" in all_evidence or "pool" in all_evidence, (
+            f"Should flag connection/pooling concepts; got: {all_evidence}"
+        )
+
+    def test_blind_spot_uses_shared_extraction(self, adversarial, wis_engine, exp_engine):
+        """Verify adversarial engine uses the same extraction as coverage engine."""
+        from wisdom.engine.coverage import _extract_concepts
+
+        for i in range(6):
+            exp_engine.add(
+                description=f"Implementing caching strategies for microservices {i}",
+                domain="architecture",
+            )
+
+        w = wis_engine.add(
+            statement="Design microservices with clear boundaries",
+            reasoning="Bounded contexts prevent coupling",
+            domains=["architecture"],
+            applicability_conditions=["Distributed systems"],
+        )
+
+        report = adversarial.challenge(w)
+        blind_spots = [f for f in report.findings if f.category == "blind_spot"]
+
+        # Extract quoted concepts from evidence like "'concept' (3x), 'other' (5x)"
+        for finding in blind_spots:
+            import re
+            concepts_found = re.findall(r"'([a-z_]+)'", finding.evidence)
+            for concept in concepts_found:
+                if len(concept) > 5:
+                    assert not concept.endswith("ing"), (
+                        f"Concept '{concept}' not normalized — still ends in -ing"
+                    )
+
+    def test_conflict_detection_normalized(self, adversarial):
+        """Conflict detection should recognize morphological variants as shared concepts."""
+        # "indexing" and "indexed" should normalize to "index";
+        # "database" and "queries"/"query" provide additional overlap
+        assert adversarial._statements_may_conflict(
+            "Always prefer database indexing for query performance",
+            "Never use database indexed queries in write-heavy systems",
+        )
+
+    def test_conflict_detection_unrelated(self, adversarial):
+        """Unrelated statements should not be detected as conflicts."""
+        assert not adversarial._statements_may_conflict(
+            "Use connection pooling for databases",
+            "Write unit tests for all public functions",
+        )
+
 
 # ── Propagation Tests ───────────────────────────────────────────────────────
 
@@ -750,11 +847,167 @@ class TestCoverage:
         )
 
         suspicious = coverage.find_suspicious_wisdom(domain="databases")
-        # The vague wisdom should be flagged
-        assert len(suspicious) >= 0  # May or may not flag depending on stopwords
+        # The vague wisdom "Be careful with databases" should be flagged as suspicious
+        # because it's too vague relative to the domain's concept space
+        assert any(
+            "Be careful with databases" in s.get("statement", "")
+            for s in suspicious
+        ), f"Vague wisdom should be flagged; got {suspicious}"
 
     def test_insufficient_data_handled(self, coverage, wis_engine):
         """Should handle domains with too few experiences gracefully."""
         wis_engine.add(statement="Sparse domain wisdom", domains=["sparse"])
         result = coverage.find_domain_blind_spots("sparse")
         assert result.get("status") in ("no_wisdom", "analyzed")
+
+
+class TestSemanticGaps:
+    """Tests for embedding-based semantic gap detection."""
+
+    def test_semantic_gaps_insufficient_data(self, coverage):
+        result = coverage.find_semantic_gaps("empty_domain")
+        assert result["status"] == "insufficient_data"
+
+    def test_semantic_gaps_no_wisdom_embeddings(self, coverage, exp_engine):
+        """Should handle domains with experiences but no wisdom embeddings."""
+        for i in range(5):
+            exp_engine.add(description=f"Experience {i}", domain="orphan")
+        result = coverage.find_semantic_gaps("orphan")
+        assert result["status"] == "no_wisdom_embeddings"
+
+    def test_semantic_gaps_finds_uncovered(self, coverage, wis_engine, exp_engine):
+        """Experiences about topics not covered by wisdom should appear as gaps."""
+        wis_engine.add(
+            statement="Use connection pooling for database efficiency",
+            reasoning="Pooling amortizes connection cost",
+            domains=["mixed"],
+        )
+
+        # Add experiences about a completely unrelated topic in the same domain
+        for i in range(5):
+            exp_engine.add(
+                description=f"Analyzing soil pH levels and nitrogen content for crop rotation planning season {i}",
+                domain="mixed",
+            )
+
+        result = coverage.find_semantic_gaps("mixed", similarity_threshold=0.6)
+        assert result["status"] == "analyzed"
+        assert result["uncovered_count"] >= 1
+        assert result["experience_count"] == 5
+        assert len(result["most_distant"]) >= 1
+
+    def test_semantic_gaps_covered_experiences(self, coverage, wis_engine, exp_engine):
+        """Experiences semantically close to wisdom should not be flagged."""
+        wis_engine.add(
+            statement="Use connection pooling for database query performance",
+            reasoning="Individual connections are expensive",
+            domains=["databases"],
+        )
+
+        for i in range(5):
+            exp_engine.add(
+                description=f"Configured database connection pool size for production {i}",
+                domain="databases",
+            )
+
+        result = coverage.find_semantic_gaps("databases")
+        assert result["status"] == "analyzed"
+        # These experiences are semantically close to the wisdom
+        # Uncovered ratio should be low
+        assert result["uncovered_ratio"] < 1.0
+
+    def test_semantic_gaps_threshold(self, coverage, wis_engine, exp_engine):
+        """Higher threshold should flag more experiences as uncovered."""
+        wis_engine.add(
+            statement="Profile before optimizing code performance",
+            domains=["performance"],
+        )
+        for i in range(4):
+            exp_engine.add(
+                description=f"Debugging memory leak in Python service {i}",
+                domain="performance",
+            )
+
+        strict = coverage.find_semantic_gaps("performance", similarity_threshold=0.8)
+        lenient = coverage.find_semantic_gaps("performance", similarity_threshold=0.3)
+
+        assert strict["uncovered_count"] >= lenient["uncovered_count"]
+
+
+class TestConceptExtraction:
+    """Tests for the improved concept extraction in coverage engine."""
+
+    def test_normalize_strips_ing(self):
+        from wisdom.engine.coverage import _normalize
+        assert _normalize("indexing") == "index"
+        assert _normalize("testing") == "test"
+        assert _normalize("caching") == "cach"  # conservative: no silent-e guessing
+
+    def test_normalize_strips_ed(self):
+        from wisdom.engine.coverage import _normalize
+        assert _normalize("indexed") == "index"
+        assert _normalize("tested") == "test"
+
+    def test_normalize_strips_plural_s(self):
+        from wisdom.engine.coverage import _normalize
+        assert _normalize("connections") == "connection"
+        assert _normalize("queries") == "query"  # ies → y
+
+    def test_normalize_preserves_short_words(self):
+        from wisdom.engine.coverage import _normalize
+        assert _normalize("uses") == "uses"  # too short after strip
+        assert _normalize("code") == "code"  # no suffix to strip
+
+    def test_normalize_doubled_consonant(self):
+        from wisdom.engine.coverage import _normalize
+        assert _normalize("running") == "run"
+        assert _normalize("stopped") == "stop"
+
+    def test_normalize_preserves_inherent_ss(self):
+        """Words with inherent 'ss' like passing/missing keep the double-s."""
+        from wisdom.engine.coverage import _normalize
+        assert _normalize("passing") == "pass"
+        assert _normalize("missing") == "miss"
+        assert _normalize("processing") == "process"
+        assert _normalize("pressed") == "press"
+
+    def test_normalize_preserves_ss_and_us(self):
+        from wisdom.engine.coverage import _normalize
+        assert _normalize("access") == "access"
+        assert _normalize("status") == "status"
+
+    def test_extract_bigrams(self):
+        from wisdom.engine.coverage import _extract_concepts
+        concepts = _extract_concepts("connection pooling strategy")
+        assert "connection" in concepts
+        assert "pool" in concepts  # pooling → pool
+        assert "strategy" in concepts
+        assert "connection_pool" in concepts  # bigram
+
+    def test_extract_strips_punctuation(self):
+        from wisdom.engine.coverage import _extract_concepts
+        concepts = _extract_concepts("indexing, testing; and caching.")
+        assert "index" in concepts  # stripped -ing
+        assert "test" in concepts
+        assert "cach" in concepts
+
+    def test_normalization_groups_variants(self):
+        """Wisdom saying 'index' should match experiences saying 'indexing'."""
+        from wisdom.engine.coverage import _extract_concepts
+        wisdom_concepts = _extract_concepts("Use proper index design")
+        exp_concepts = _extract_concepts("Optimized database indexing")
+        # Both should contain 'index'
+        assert "index" in wisdom_concepts
+        assert "index" in exp_concepts
+
+    def test_bigrams_skip_stopwords(self):
+        from wisdom.engine.coverage import _extract_concepts
+        concepts = _extract_concepts("index for the query")
+        # "index" and "query" are not adjacent after stopword removal
+        assert "index_query" not in concepts
+
+    def test_no_self_bigrams(self):
+        from wisdom.engine.coverage import _extract_concepts
+        concepts = _extract_concepts("test test test")
+        # Same word adjacent should not create bigram
+        assert "test_test" not in concepts

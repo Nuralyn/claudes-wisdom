@@ -351,7 +351,11 @@ def get_wisdom_gaps(ctx: Context, domain: str = "") -> str:
 
 @mcp.tool()
 def run_maintenance(ctx: Context) -> str:
-    """Run automatic maintenance — extraction, synthesis, deprecation sweeps."""
+    """Run automatic maintenance — extraction, synthesis, deprecation sweeps.
+
+    Includes post-deprecation meta-learning analysis that identifies WHY
+    entries were deprecated, enabling systemic pattern detection.
+    """
     system = _system(ctx)
     summary = system.run_maintenance()
 
@@ -364,6 +368,10 @@ def run_maintenance(ctx: Context) -> str:
             lines.append(f"Synthesized: {r['wisdom_created']} wisdom from {r['knowledge_processed']} knowledge in {r['domain']}")
     if summary["deprecated"]:
         lines.append(f"Deprecated: {len(summary['deprecated'])} wisdom entries")
+    if summary.get("deprecation_analysis"):
+        lines.append("Deprecation analysis:")
+        for a in summary["deprecation_analysis"]:
+            lines.append(f"  {a['wisdom_id']}: risk={a['risk_score']:.2f} ({a['risk_level']})")
     if summary["validated"]:
         lines.append(f"Needs validation: {len(summary['validated'])} entries")
 
@@ -407,15 +415,21 @@ def challenge_wisdom(ctx: Context, wisdom_id: str) -> str:
     """Run the adversarial devil's advocate challenge against a wisdom entry.
 
     Checks for counterexamples, vagueness, contradictions, and blind spots.
+    Uses meta-learning risk profiles to adjust challenge intensity — high-risk
+    entries get scrutinized harder.
     """
     system = _system(ctx)
     w = system.wisdom.get(wisdom_id)
     if not w:
         return f"Wisdom not found: {wisdom_id}"
 
-    report = system.adversarial.challenge(w)
+    # Use meta-learning to compute risk-adjusted challenge thresholds
+    risk_profile = system.meta_learning.risk_profile_for_adversarial(wisdom_id)
+    report = system.adversarial.challenge(w, risk_profile=risk_profile)
 
     lines = [f"{'PASSED' if report.passed else 'FAILED'}: {report.summary}"]
+    if risk_profile:
+        lines.append(f"Risk level: {risk_profile.get('risk_level', 'standard')} (thresholds adjusted)")
     for f in report.findings:
         lines.append(f"[{f.severity.upper()}] [{f.category}] {f.description}")
         if f.evidence:
@@ -453,7 +467,12 @@ def cascade_failure(ctx: Context, wisdom_id: str, severity: float = 1.0) -> str:
 
 @mcp.tool()
 def analyze_coverage(ctx: Context, domain: str) -> str:
-    """Analyze semantic coverage — what wisdom fails to mention for a domain."""
+    """Analyze semantic coverage — what wisdom fails to mention for a domain.
+
+    Runs two types of analysis:
+    1. Token-level: frequent concepts in experiences missing from wisdom text
+    2. Embedding-level: experiences semantically distant from all wisdom entries
+    """
     system = _system(ctx)
     result = system.coverage.find_domain_blind_spots(domain)
     if result.get("status") == "no_wisdom":
@@ -467,13 +486,113 @@ def analyze_coverage(ctx: Context, domain: str) -> str:
     ]
     blind_spots = result.get("blind_spots", [])
     if blind_spots:
-        lines.append(f"\nBlind spots ({len(blind_spots)}):")
+        lines.append(f"\nToken-level blind spots ({len(blind_spots)}):")
         for bs in blind_spots[:10]:
             lines.append(f"  '{bs['concept']}' — {bs['frequency']} experiences ({bs['coverage_ratio']:.0%})")
     else:
-        lines.append("\nNo significant blind spots.")
+        lines.append("\nNo token-level blind spots.")
+
+    # Semantic (embedding) gap analysis
+    semantic = system.coverage.find_semantic_gaps(domain)
+    if semantic.get("status") == "analyzed" and semantic.get("uncovered_count", 0) > 0:
+        lines.append(f"\nSemantic gaps ({semantic['uncovered_count']}/{semantic['experience_count']} experiences uncovered):")
+        for gap in semantic.get("most_distant", [])[:8]:
+            lines.append(f"  [{gap['best_wisdom_similarity']:.2f}] {gap['description']}")
+    elif semantic.get("status") == "analyzed":
+        lines.append("\nNo semantic gaps — all experiences have nearby wisdom.")
 
     return "\n".join(lines)
+
+
+@mcp.tool()
+def get_risk_score(ctx: Context, wisdom_id: str) -> str:
+    """Compute a risk score for a wisdom entry based on historical failure patterns.
+
+    Analyzes type risk, creation method risk, domain contamination, validation
+    status, and application history. Returns a risk level and recommended
+    challenge intensity.
+
+    Args:
+        wisdom_id: The wisdom entry to assess
+    """
+    system = _system(ctx)
+    w = system.wisdom.get(wisdom_id)
+    if not w:
+        return f"Wisdom not found: {wisdom_id}"
+
+    risk = system.meta_learning.compute_risk_score(wisdom_id)
+    lines = [
+        f"Wisdom: {w.statement[:60]}",
+        f"Risk score: {risk.base_risk:.2f} ({risk.recommended_challenge_level})",
+    ]
+    if risk.risk_factors:
+        lines.append("Risk factors:")
+        for factor in risk.risk_factors:
+            lines.append(f"  - {factor.get('name', '?')}: {factor.get('value', 0):.2f} ({factor.get('reason', '')})")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_meta_learning_summary(ctx: Context) -> str:
+    """Get a comprehensive meta-learning analysis of the system's failure patterns.
+
+    Shows failure profiles by type/method, domain risk assessments,
+    contamination super-spreaders, confidence trajectory, learning velocity
+    by category, and most volatile entries.
+    """
+    system = _system(ctx)
+    s = system.meta_learning.summary()
+
+    lines = []
+    # Failure profiles
+    profiles = s.get("failure_profiles", [])
+    if profiles:
+        lines.append("Failure Profiles:")
+        for p in profiles:
+            lines.append(f"  {p.category}: {p.failure_rate:.0%} failure ({p.deprecated_count}/{p.total_count})")
+    else:
+        lines.append("No failure profiles yet (need deprecation history).")
+
+    # Domain risks
+    risky_domains = s.get("risky_domains", [])
+    if risky_domains:
+        lines.append("\nDomain Risk Assessment:")
+        for d in risky_domains:
+            lines.append(f"  {d['domain']}: risk={d['risk_score']:.2f}")
+
+    # Contamination super-spreaders
+    patterns = s.get("super_spreaders", [])
+    if patterns:
+        lines.append("\nContamination Super-spreaders:")
+        for p in patterns:
+            lines.append(f"  {p.source_wisdom_id}: affected {p.total_affected} entries (avg penalty: {p.avg_penalty:.3f})")
+
+    # Confidence trajectory
+    traj = s.get("trajectory", {})
+    if traj.get("total_events"):
+        lines.append(f"\nConfidence Trajectory: {traj['total_events']} events, avg delta: {traj.get('avg_delta', 0):.3f}")
+        if traj.get("top_decrease_reasons"):
+            lines.append("  Top decrease reasons:")
+            for item in traj["top_decrease_reasons"]:
+                lines.append(f"    - {item['reason']}: {item['count']}x")
+
+    # Learning velocity
+    velocity = s.get("velocity", [])
+    if velocity:
+        lines.append("\nLearning Velocity (confidence delta/day):")
+        for vp in velocity[:8]:
+            sign = "+" if vp.avg_velocity >= 0 else ""
+            lines.append(f"  {vp.category}: {sign}{vp.avg_velocity:.4f}/day ({vp.entry_count} entries, {vp.avg_events_per_day:.2f} events/day)")
+
+    # Confidence volatility
+    volatility = s.get("volatility", [])
+    if volatility:
+        lines.append("\nMost Volatile Entries:")
+        for ve in volatility:
+            lines.append(f"  [{ve.volatility_score:.2f}] {ve.statement_preview}")
+            lines.append(f"    {ve.total_events} events, {ve.direction_changes} reversals, max swing: {ve.max_swing:.3f}")
+
+    return "\n".join(lines) if lines else "No meta-learning data available yet."
 
 
 # ── Resources ───────────────────────────────────────────────────────────────
@@ -489,19 +608,25 @@ def _resource_system() -> WisdomSystem:
 @mcp.resource("wisdom://domains")
 def domains_resource() -> str:
     """List all domains in the wisdom system."""
-    system = _resource_system()
+    system = None
     try:
+        system = _resource_system()
         domains = system.sqlite.get_all_domains()
         return "\n".join(domains) if domains else "No domains yet."
+    except Exception as e:
+        logger.error("Failed to list domains: %s", e)
+        return f"Error: {e}"
     finally:
-        system.close()
+        if system:
+            system.close()
 
 
 @mcp.resource("wisdom://stats")
 def stats_resource() -> str:
     """System-wide statistics."""
-    system = _resource_system()
+    system = None
     try:
+        system = _resource_system()
         stats = system.stats()
         lines = [
             f"Experiences: {stats['experiences']}",
@@ -511,15 +636,20 @@ def stats_resource() -> str:
             f"Domains: {', '.join(stats['domains'])}",
         ]
         return "\n".join(lines)
+    except Exception as e:
+        logger.error("Failed to get stats: %s", e)
+        return f"Error: {e}"
     finally:
-        system.close()
+        if system:
+            system.close()
 
 
 @mcp.resource("wisdom://recent")
 def recent_resource() -> str:
     """Recent system events."""
-    system = _resource_system()
+    system = None
     try:
+        system = _resource_system()
         events = system.sqlite.get_recent_events(limit=20)
         if not events:
             return "No recent events."
@@ -527,5 +657,9 @@ def recent_resource() -> str:
         for e in events:
             lines.append(f"{e['timestamp'][:19]} | {e['entity_type']} {e['entity_id'][:12]} | {e['reason']}")
         return "\n".join(lines)
+    except Exception as e:
+        logger.error("Failed to get recent events: %s", e)
+        return f"Error: {e}"
     finally:
-        system.close()
+        if system:
+            system.close()

@@ -17,6 +17,8 @@ from wisdom.engine.meta_learning import (
     FailureProfile,
     MetaLearningEngine,
     RiskScore,
+    VelocityProfile,
+    VolatilityEntry,
 )
 from wisdom.engine.propagation import PropagationEngine
 from wisdom.engine.wisdom_engine import WisdomEngine
@@ -258,29 +260,54 @@ class TestRiskScore:
         w = _make_wisdom(sqlite, vector, statement="Risk factors test")
         risk = meta.compute_risk_score(w.id)
 
-        assert len(risk.risk_factors) == 5
+        assert len(risk.risk_factors) == 6
         factor_names = {f["name"] for f in risk.risk_factors}
         assert factor_names == {
             "type_risk", "method_risk", "domain_risk",
-            "validation_risk", "application_risk",
+            "validation_risk", "application_risk", "volatility_risk",
         }
-        # Every factor has a reason
         for f in risk.risk_factors:
             assert "reason" in f
             assert "value" in f
 
     def test_challenge_level_thresholds(self, sqlite, vector, meta):
-        # Standard: base_risk <= 0.3
-        # We can't fully control the exact risk, but we can verify the mapping
         w = _make_wisdom(sqlite, vector, statement="Threshold test")
         risk = meta.compute_risk_score(w.id)
-        # Verify the level matches the threshold
         if risk.base_risk <= 0.3:
             assert risk.recommended_challenge_level == "standard"
         elif risk.base_risk <= 0.6:
             assert risk.recommended_challenge_level == "elevated"
         else:
             assert risk.recommended_challenge_level == "maximum"
+
+    def test_volatility_increases_risk(self, sqlite, vector, meta):
+        """Erratic confidence history should increase the risk score."""
+        w_stable = _make_wisdom(sqlite, vector, statement="Stable risk entry",
+                                confidence=0.5)
+        w_volatile = _make_wisdom(sqlite, vector, statement="Volatile risk entry",
+                                  confidence=0.5)
+
+        # Stable: steady improvement
+        sqlite.log_confidence_change("wisdom", w_stable.id, 0.5, 0.55, "up")
+        sqlite.log_confidence_change("wisdom", w_stable.id, 0.55, 0.6, "up")
+
+        # Volatile: bouncing
+        sqlite.log_confidence_change("wisdom", w_volatile.id, 0.5, 0.7, "up")
+        sqlite.log_confidence_change("wisdom", w_volatile.id, 0.7, 0.45, "down")
+        sqlite.log_confidence_change("wisdom", w_volatile.id, 0.45, 0.65, "up")
+        sqlite.log_confidence_change("wisdom", w_volatile.id, 0.65, 0.4, "down")
+
+        risk_stable = meta.compute_risk_score(w_stable.id)
+        risk_volatile = meta.compute_risk_score(w_volatile.id)
+
+        vol_factor_stable = next(
+            f["value"] for f in risk_stable.risk_factors if f["name"] == "volatility_risk"
+        )
+        vol_factor_volatile = next(
+            f["value"] for f in risk_volatile.risk_factors if f["name"] == "volatility_risk"
+        )
+        assert vol_factor_volatile > vol_factor_stable
+        assert risk_volatile.base_risk > risk_stable.base_risk
 
 
 class TestContaminationPatterns:
@@ -418,11 +445,176 @@ class TestAdversarialIntegration:
         assert isinstance(report.passed, bool)
 
 
+class TestLearningVelocity:
+    """Verify learning velocity computation."""
+
+    def test_velocity_empty_system(self, meta):
+        velocity = meta.learning_velocity()
+        assert velocity == []
+
+    def test_velocity_with_improving_entries(self, sqlite, vector, meta):
+        """Entries with positive confidence changes should have positive velocity."""
+        w1 = _make_wisdom(sqlite, vector, wtype="heuristic", domains=["databases"],
+                          statement="Improving heuristic", confidence=0.5)
+        w2 = _make_wisdom(sqlite, vector, wtype="principle", domains=["databases"],
+                          statement="Improving principle", confidence=0.5)
+
+        # Simulate confidence improvements
+        sqlite.log_confidence_change("wisdom", w1.id, 0.5, 0.6, "reinforcement_positive")
+        sqlite.log_confidence_change("wisdom", w1.id, 0.6, 0.72, "reinforcement_positive")
+        sqlite.log_confidence_change("wisdom", w2.id, 0.5, 0.55, "reinforcement_positive")
+
+        velocity = meta.learning_velocity()
+        assert len(velocity) > 0
+
+        # All entries are improving, so avg_velocity should be positive
+        for vp in velocity:
+            assert isinstance(vp, VelocityProfile)
+            assert vp.avg_velocity > 0
+
+    def test_velocity_groups_by_type_and_domain(self, sqlite, vector, meta):
+        """Should produce separate profiles for type and domain categories."""
+        w = _make_wisdom(sqlite, vector, wtype="heuristic", domains=["python"],
+                         statement="Velocity grouping test", confidence=0.4)
+        sqlite.log_confidence_change("wisdom", w.id, 0.4, 0.5, "reinforcement_positive")
+
+        velocity = meta.learning_velocity()
+        categories = {vp.category for vp in velocity}
+        assert "type:heuristic" in categories
+        assert "domain:python" in categories
+
+    def test_velocity_declining_entries(self, sqlite, vector, meta):
+        """Entries with negative confidence changes should have negative velocity."""
+        w = _make_wisdom(sqlite, vector, statement="Declining wisdom", confidence=0.8)
+        sqlite.log_confidence_change("wisdom", w.id, 0.8, 0.7, "reinforcement_negative")
+        sqlite.log_confidence_change("wisdom", w.id, 0.7, 0.6, "contamination_cascade")
+
+        velocity = meta.learning_velocity()
+        # The type profile should show negative velocity
+        type_profiles = [vp for vp in velocity if vp.category.startswith("type:")]
+        assert any(vp.avg_velocity < 0 for vp in type_profiles)
+
+    def test_velocity_sorted_by_speed(self, sqlite, vector, meta):
+        """Profiles should be sorted fastest first."""
+        w_fast = _make_wisdom(sqlite, vector, wtype="heuristic",
+                              statement="Fast learner", confidence=0.3)
+        w_slow = _make_wisdom(sqlite, vector, wtype="principle",
+                              statement="Slow learner", confidence=0.5)
+
+        # Fast: big jumps
+        sqlite.log_confidence_change("wisdom", w_fast.id, 0.3, 0.6, "reinforcement_positive")
+        # Slow: tiny jump
+        sqlite.log_confidence_change("wisdom", w_slow.id, 0.5, 0.51, "reinforcement_positive")
+
+        velocity = meta.learning_velocity()
+        type_profiles = [vp for vp in velocity if vp.category.startswith("type:")]
+        if len(type_profiles) >= 2:
+            # Should be sorted descending by velocity
+            assert type_profiles[0].avg_velocity >= type_profiles[1].avg_velocity
+
+    def test_velocity_requires_confidence_events(self, sqlite, vector, meta):
+        """Entries with no confidence events should be excluded."""
+        _make_wisdom(sqlite, vector, statement="No events yet")
+        velocity = meta.learning_velocity()
+        assert velocity == []
+
+
+class TestConfidenceVolatility:
+    """Verify confidence volatility detection."""
+
+    def test_volatility_empty_system(self, meta):
+        vol = meta.confidence_volatility()
+        assert vol == []
+
+    def test_stable_entry_low_volatility(self, sqlite, vector, meta):
+        """Consistent upward movement should have low volatility."""
+        w = _make_wisdom(sqlite, vector, statement="Steady improver", confidence=0.4)
+        sqlite.log_confidence_change("wisdom", w.id, 0.4, 0.45, "reinforcement_positive")
+        sqlite.log_confidence_change("wisdom", w.id, 0.45, 0.50, "reinforcement_positive")
+        sqlite.log_confidence_change("wisdom", w.id, 0.50, 0.55, "reinforcement_positive")
+
+        vol = meta.confidence_volatility()
+        assert len(vol) == 1
+        assert vol[0].direction_changes == 0
+        assert vol[0].volatility_score < 0.5
+
+    def test_erratic_entry_high_volatility(self, sqlite, vector, meta):
+        """Entries bouncing up and down should have high volatility."""
+        w = _make_wisdom(sqlite, vector, statement="Erratic wisdom", confidence=0.5)
+        sqlite.log_confidence_change("wisdom", w.id, 0.5, 0.6, "reinforcement_positive")
+        sqlite.log_confidence_change("wisdom", w.id, 0.6, 0.48, "contamination_cascade")
+        sqlite.log_confidence_change("wisdom", w.id, 0.48, 0.58, "reinforcement_positive")
+        sqlite.log_confidence_change("wisdom", w.id, 0.58, 0.45, "contamination_cascade")
+
+        vol = meta.confidence_volatility()
+        assert len(vol) == 1
+        assert vol[0].direction_changes >= 2
+        assert vol[0].volatility_score > 0.5
+
+    def test_most_volatile_ranked_first(self, sqlite, vector, meta):
+        """Should rank entries by volatility score descending."""
+        w_calm = _make_wisdom(sqlite, vector, statement="Calm entry", confidence=0.5)
+        w_wild = _make_wisdom(sqlite, vector, statement="Wild entry", confidence=0.5)
+
+        # Calm: steady increase
+        sqlite.log_confidence_change("wisdom", w_calm.id, 0.5, 0.55, "reinforcement_positive")
+        sqlite.log_confidence_change("wisdom", w_calm.id, 0.55, 0.60, "reinforcement_positive")
+
+        # Wild: bouncing
+        sqlite.log_confidence_change("wisdom", w_wild.id, 0.5, 0.7, "reinforcement_positive")
+        sqlite.log_confidence_change("wisdom", w_wild.id, 0.7, 0.45, "contamination_cascade")
+        sqlite.log_confidence_change("wisdom", w_wild.id, 0.45, 0.65, "reinforcement_positive")
+
+        vol = meta.confidence_volatility()
+        assert len(vol) == 2
+        assert vol[0].wisdom_id == w_wild.id
+        assert vol[0].volatility_score > vol[1].volatility_score
+
+    def test_volatility_limit(self, sqlite, vector, meta):
+        """Should respect the limit parameter."""
+        for i in range(5):
+            w = _make_wisdom(sqlite, vector, statement=f"Vol entry {i}", confidence=0.5)
+            sqlite.log_confidence_change("wisdom", w.id, 0.5, 0.6, "up")
+            sqlite.log_confidence_change("wisdom", w.id, 0.6, 0.5, "down")
+
+        vol = meta.confidence_volatility(limit=3)
+        assert len(vol) == 3
+
+    def test_single_event_excluded(self, sqlite, vector, meta):
+        """Entries with only one confidence event should not appear."""
+        w = _make_wisdom(sqlite, vector, statement="One event only", confidence=0.5)
+        sqlite.log_confidence_change("wisdom", w.id, 0.5, 0.6, "reinforcement_positive")
+
+        vol = meta.confidence_volatility()
+        assert len(vol) == 0
+
+    def test_max_swing_tracked(self, sqlite, vector, meta):
+        """Should track the largest single confidence change."""
+        w = _make_wisdom(sqlite, vector, statement="Big swing", confidence=0.5)
+        sqlite.log_confidence_change("wisdom", w.id, 0.5, 0.55, "small_up")
+        sqlite.log_confidence_change("wisdom", w.id, 0.55, 0.35, "big_drop")
+
+        vol = meta.confidence_volatility()
+        assert len(vol) == 1
+        assert abs(vol[0].max_swing - 0.20) < 0.01
+
+    def test_statement_preview(self, sqlite, vector, meta):
+        """Should include a preview of the wisdom statement."""
+        w = _make_wisdom(sqlite, vector,
+                         statement="A very specific principle about database connection pooling",
+                         confidence=0.5)
+        sqlite.log_confidence_change("wisdom", w.id, 0.5, 0.6, "up")
+        sqlite.log_confidence_change("wisdom", w.id, 0.6, 0.5, "down")
+
+        vol = meta.confidence_volatility()
+        assert len(vol) == 1
+        assert "database connection pooling" in vol[0].statement_preview
+
+
 class TestSummary:
     """Verify the complete summary output."""
 
     def test_summary_structure(self, sqlite, vector, meta):
-        # Create some data
         _make_wisdom(sqlite, vector, lifecycle="deprecated", statement="Dep 1")
         _make_wisdom(sqlite, vector, lifecycle="established", statement="Est 1")
 
@@ -431,6 +623,8 @@ class TestSummary:
         assert "risky_domains" in s
         assert "super_spreaders" in s
         assert "trajectory" in s
+        assert "velocity" in s
+        assert "volatility" in s
         assert "total_profiles_analyzed" in s
         assert "total_domains_analyzed" in s
 
@@ -442,8 +636,18 @@ class TestSummary:
 
         s = meta.summary()
         assert len(s["failure_profiles"]) > 0
-        # The heuristic type should appear in profiles
         has_heuristic = any(
             p.category == "type:heuristic" for p in s["failure_profiles"]
         )
         assert has_heuristic
+
+    def test_summary_includes_velocity_and_volatility(self, sqlite, vector, meta):
+        """Summary should include velocity and volatility when data exists."""
+        w = _make_wisdom(sqlite, vector, statement="Summary velocity test", confidence=0.5)
+        sqlite.log_confidence_change("wisdom", w.id, 0.5, 0.6, "up")
+        sqlite.log_confidence_change("wisdom", w.id, 0.6, 0.5, "down")
+
+        s = meta.summary()
+        assert isinstance(s["velocity"], list)
+        assert isinstance(s["volatility"], list)
+        assert len(s["volatility"]) >= 1

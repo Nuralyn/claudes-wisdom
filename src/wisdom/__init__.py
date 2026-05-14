@@ -82,13 +82,35 @@ class WisdomSystem:
         self.vector.warmup()
 
     def run_maintenance(self) -> dict:
-        """Run all auto-triggered maintenance."""
-        return self.triggers.run_maintenance(
+        """Run all auto-triggered maintenance with post-deprecation analysis.
+
+        After the standard maintenance sweep (extract, synthesize, deprecate),
+        runs meta-learning analysis on any deprecated entries to identify
+        systemic failure patterns. This closes the loop: the system learns
+        not just THAT something failed, but WHY.
+        """
+        summary = self.triggers.run_maintenance(
             experience_engine=self.experiences,
             knowledge_engine=self.knowledge,
             wisdom_engine=self.wisdom,
             evolution_engine=self.evolution,
         )
+
+        # Post-deprecation meta-learning analysis
+        if summary.get("deprecated"):
+            risk_analysis = []
+            for wid in summary["deprecated"]:
+                risk = self.meta_learning.compute_risk_score(wid)
+                if risk and risk.risk_factors:
+                    risk_analysis.append({
+                        "wisdom_id": wid,
+                        "risk_score": risk.base_risk,
+                        "risk_level": risk.recommended_challenge_level,
+                        "factors": risk.risk_factors,
+                    })
+            summary["deprecation_analysis"] = risk_analysis
+
+        return summary
 
     def stats(self) -> dict:
         """Get system-wide statistics."""

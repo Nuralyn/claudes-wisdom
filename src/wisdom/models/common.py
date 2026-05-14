@@ -140,6 +140,11 @@ class ConfidenceScore(BaseModel):
         overall changes by approximately desired_overall_delta (exact when
         other dimensions don't change and no clamping occurs).
         """
+        if dimension not in self._WEIGHTS:
+            raise ValueError(
+                f"Invalid confidence dimension '{dimension}'. "
+                f"Must be one of: {', '.join(self._WEIGHTS)}"
+            )
         weight = self._WEIGHTS[dimension]
         sub_delta = desired_overall_delta / weight
         current = getattr(self, dimension)
